@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import os
 
+
 def convert_pdf_to_markdown_and_json(source_dir, converted_dir, filename):
     try:
         # Create full path for source file
@@ -53,6 +54,7 @@ def convert_pdf_to_markdown_and_json(source_dir, converted_dir, filename):
     except Exception as e:
         print(f"An error occurred: {str(e)}")
 
+
 def main():
     # Specify your directories and filename
     print("starting the project")
@@ -62,6 +64,7 @@ def main():
 
     # Convert the PDF
     convert_pdf_to_markdown_and_json(source_directory, converted_directory, pdf_filename)
+
 
 if __name__ == "__main__":
     main()
