@@ -3,8 +3,9 @@ import json
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
+
 class QdrantUploader:
-    def __init__(self, collection_name="documents", qdrant_host="localhost", qdrant_port=6333):
+    def __init__(self, collection_name="aiml_vector_db", qdrant_host="localhost", qdrant_port=6333):
         self.client = QdrantClient(host=qdrant_host, port=qdrant_port)
         self.collection_name = collection_name
         self.next_id = 0  # Counter for generating unique integer IDs
@@ -57,7 +58,8 @@ class QdrantUploader:
                     payload = {
                         "text": text,
                         "source_file": chunk.get("source_file", json_file),
-                        "original_chunk_id": chunk.get("chunk_id", self.next_id)  # Preserve original chunk ID if present
+                        "original_chunk_id": chunk.get("chunk_id", self.next_id)
+                        # Preserve original chunk ID if present
                     }
                     point_id = self.next_id  # Use integer ID
 
@@ -85,19 +87,31 @@ class QdrantUploader:
 
         print(f"\nCompleted: Uploaded a total of {total_points} points to {self.collection_name}")
 
-def main():
-    embedded_docs_dir = "embedded_docs"
-    collection_name = "aiml_vector_db"
-    vector_size = 1536
+    def search(self, query_vector, limit=5):
+        """Search Qdrant for the top similar vectors."""
+        results = self.client.search(
+            collection_name=self.collection_name,
+            query_vector=query_vector,
+            limit=limit,
+            with_payload=True
+        )
+        return results
 
-    uploader = QdrantUploader(
-        collection_name=collection_name,
-        qdrant_host="localhost",
-        qdrant_port=6333
-    )
 
-    uploader.create_collection(vector_size=vector_size, distance=Distance.COSINE)
-    uploader.upload_embeddings(embedded_docs_dir)
-
-if __name__ == "__main__":
-    main()
+# def main():
+#     embedded_docs_dir = "embedded_docs"
+#     collection_name = "aiml_vector_db"
+#     vector_size = 1536
+#
+#     uploader = QdrantUploader(
+#         collection_name=collection_name,
+#         qdrant_host="localhost",
+#         qdrant_port=6333
+#     )
+#
+#     uploader.create_collection(vector_size=vector_size, distance=Distance.COSINE)
+#     uploader.upload_embeddings(embedded_docs_dir)
+#
+#
+# if __name__ == "__main__":
+#     main()
