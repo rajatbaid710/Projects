@@ -1,115 +1,163 @@
-import json
 import os
+import json
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+import nltk
+import spacy
+from typing import List, Dict, Any
+
+# Ensure required models are downloaded
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
+try:
+    spacy_nlp = spacy.load('en_core_web_sm')
+except OSError:
+    spacy.cli.download('en_core_web_sm')
+    spacy_nlp = spacy.load('en_core_web_sm')
 
 
 class ChunkGenerator:
-    def __init__(self, chunk_size=1000, chunk_overlap=200):
+    def __init__(self, strategy: str = "recursive_char", chunk_size: int = 512, chunk_overlap: int = 50, **kwargs):
         """
-        Initialize the ChunkGenerator with chunking parameters.
+        Initialize the chunker with a strategy and parameters.
 
         Args:
-            chunk_size (int): Target size of each chunk in characters
-            chunk_overlap (int): Number of overlapping characters between chunks
+            strategy (str): 'fixed_char', 'recursive_char', 'sentence', or 'semantic'
+            chunk_size (int): Target size of each chunk (characters or sentences, depending on strategy)
+            chunk_overlap (int): Overlap between chunks (characters or sentences)
+            **kwargs: Strategy-specific parameters (e.g., separators for recursive_char)
         """
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            length_function=len,
-            separators=["\n\n", "\n", ".", " ", ""]
-        )
+        self.strategy = strategy.lower()
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.kwargs = kwargs
 
-    def chunk_json_files(self, input_dir, output_dir):
-        """
-        Split all JSON files from input directory into chunks.
+        # Initialize the appropriate splitter based on strategy
+        if self.strategy == "fixed_char":
+            # Simple fixed-size character splitting without separators
+            self.splitter = lambda text: self._fixed_char_split(text)
+        elif self.strategy == "recursive_char":
+            # LangChain's recursive character splitter with customizable separators
+            self.splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                length_function=len,
+                add_start_index=True,
+                separators=kwargs.get("separators", ["\n\n", "\n", ".", " ", ""])
+            ).split_text
+        elif self.strategy == "sentence":
+            # Sentence-based splitting using NLTK
+            self.splitter = lambda text: self._sentence_split(text)
+        elif self.strategy == "semantic":
+            # Basic semantic splitting using spaCy
+            self.splitter = lambda text: self._semantic_split(text)
+        else:
+            raise ValueError(f"Unsupported chunking strategy: {strategy}")
 
-        Args:
-            input_dir (str): Directory containing input JSON files
-            output_dir (str): Base directory to save chunked files
-        """
-        # Create base output directory if it doesn't exist
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+    def _fixed_char_split(self, text: str) -> List[str]:
+        """Split text into fixed-size character chunks without considering separators."""
+        chunks = []
+        for i in range(0, len(text), self.chunk_size - self.chunk_overlap):
+            start = i
+            end = min(i + self.chunk_size, len(text))
+            chunks.append(text[start:end])
+        return chunks
 
-        # Get all JSON files from input directory
-        json_files = [f for f in os.listdir(input_dir) if f.endswith('.json')]
+    def _sentence_split(self, text: str) -> List[str]:
+        """Split text into chunks of sentences using NLTK."""
+        sentences = nltk.sent_tokenize(text)
+        chunks = []
+        current_chunk = []
+        current_length = 0
 
-        if not json_files:
-            print(f"No JSON files found in {input_dir}")
-            return
+        for sentence in sentences:
+            if current_length + len(sentence) > self.chunk_size and current_chunk:
+                chunks.append(" ".join(current_chunk))
+                # Add overlap by including the last sentence in the next chunk
+                current_chunk = [current_chunk[-1]] if self.chunk_overlap > 0 else []
+                current_length = len(current_chunk[0]) if current_chunk else 0
+            current_chunk.append(sentence)
+            current_length += len(sentence)
 
-        total_processed = 0
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+        return chunks
 
-        # Process each JSON file
-        for json_file in json_files:
-            total_processed += self._process_single_file(json_file, input_dir, output_dir)
+    def _semantic_split(self, text: str) -> List[str]:
+        """Split text semantically using spaCy (sentence-based with coherence)."""
+        doc = spacy_nlp(text)
+        chunks = []
+        current_chunk = []
+        current_length = 0
 
-        print(f"\nCompleted: Processed {total_processed} out of {len(json_files)} JSON files")
+        for sent in doc.sents:
+            if current_length + len(sent.text) > self.chunk_size and current_chunk:
+                chunks.append(" ".join(current_chunk))
+                # Overlap with the last sentence
+                current_chunk = [current_chunk[-1]] if self.chunk_overlap > 0 else []
+                current_length = len(current_chunk[0]) if current_chunk else 0
+            current_chunk.append(sent.text)
+            current_length += len(sent.text)
 
-    def _process_single_file(self, json_file, input_dir, output_dir):
-        """
-        Process a single JSON file and return 1 if successful, 0 if failed.
-        """
-        input_path = os.path.join(input_dir, json_file)
-        file_base_name = os.path.splitext(json_file)[0]
-        file_output_dir = os.path.join(output_dir, file_base_name + "_chunks")
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+        return chunks
 
-        if not os.path.exists(file_output_dir):
-            os.makedirs(file_output_dir)
+    def chunk_document(self, input_dir: str, output_dir: str) -> str:
+        """Chunk all JSON files in input_dir and save to output_dir."""
+        os.makedirs(output_dir, exist_ok=True)
 
-        try:
-            # Read the JSON file
-            with open(input_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+        for file in os.listdir(input_dir):
+            if file.lower().endswith(".json"):
+                file_path = os.path.join(input_dir, file)
 
-            # Convert JSON to string for splitting
-            json_string = json.dumps(data)
+                # Read JSON file
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
 
-            # Split the text
-            chunks = self.text_splitter.split_text(json_string)
+                markdown_content = data["content"]["markdown"]
+                metadata = data["metadata"]
 
-            # Process each chunk
-            for i, chunk in enumerate(chunks, 1):
-                self._write_chunk(chunk, file_output_dir, i)
+                # Split into chunks using the selected strategy
+                chunks = self.splitter(markdown_content)
 
-            print(f"\nProcessed {json_file}: split into {len(chunks)} chunks")
-            return 1
+                # Prepare chunked data
+                chunked_data = []
+                for i, chunk in enumerate(chunks):
+                    chunk_info = {
+                        "chunk_id": i,
+                        "text": chunk,
+                        "metadata": {
+                            **metadata,
+                            "chunk_start_index": i * (
+                                        self.chunk_size - self.chunk_overlap) if self.strategy != "recursive_char" else getattr(
+                                chunk, 'start_index', 0),
+                            "chunk_length": len(chunk)
+                        }
+                    }
+                    chunked_data.append(chunk_info)
 
-        except Exception as e:
-            print(f"Error processing {json_file}: {str(e)}")
-            return 0
+                # Save chunked data
+                output_file_name = os.path.splitext(file)[0] + f"_{self.strategy}_chunked.json"
+                output_path = os.path.join(output_dir, output_file_name)
+                with open(output_path, "w", encoding="utf-8") as f:
+                    json.dump(chunked_data, f, indent=4, ensure_ascii=False)
 
-    def _write_chunk(self, chunk, output_dir, chunk_number):
-        """
-        Write a single chunk to a file.
-        """
-        try:
-            # Try to parse chunk back to JSON
-            chunk_data = json.loads(chunk)
-        except json.JSONDecodeError:
-            # If parsing fails, store as a string in a simple JSON structure
-            chunk_data = {"content": chunk}
+                print(f"Chunked {file} with {self.strategy}: {len(chunks)} chunks created")
 
-        output_file = os.path.join(output_dir, f'chunk_{chunk_number}.json')
+        return output_dir
 
-        # Write chunk to file
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(chunk_data, f, indent=4)
-
-        print(f"Created {output_file} with size {len(chunk)} characters")
 
 # Example usage
-# if __name__ == "__main__":
-#     # Install required package: pip install langchain
-#
-#     # Initialize the ChunkGenerator
-#     chunker = ChunkGenerator(chunk_size=1000, chunk_overlap=200)
-#
-#     # Define directories
-#     input_directory = "input_json_files"
-#     output_directory = "output_chunks"
-#
-#     # Process the files
-#     chunker.chunk_json_files(input_directory, output_directory)
+if __name__ == "__main__":
+    # Recursive character splitting (LangChain)
+    #chunker = DocumentChunker(strategy="recursive_char", chunk_size=512, chunk_overlap=50, separators=["\n\n", "\n"])
+    #chunker = DocumentChunker(strategy="sentence", chunk_size=512, chunk_overlap=50)
+    chunker = DocumentChunker(strategy="semantic", chunk_size=512, chunk_overlap=50)
+    chunker.chunk_document("input_folder", "output_folder")
+
+    # Other examples:
+    # Fixed character: chunker = DocumentChunker(strategy="fixed_char", chunk_size=512, chunk_overlap=50)
+    # Sentence: chunker = DocumentChunker(strategy="sentence", chunk_size=512, chunk_overlap=50)
+    # Semantic: chunker = DocumentChunker(strategy="semantic", chunk_size=512, chunk_overlap=50)
