@@ -95,6 +95,7 @@ class QdrantUploader:
             limit=limit,
             with_payload=True
         )
+
         return results
 
 

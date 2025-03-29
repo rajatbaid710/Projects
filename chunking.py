@@ -18,7 +18,7 @@ except OSError:
 
 
 class ChunkGenerator:
-    def __init__(self, strategy: str = "recursive_char", chunk_size: int = 512, chunk_overlap: int = 50, **kwargs):
+    def __init__(self, strategy: str = "recursive_char", chunk_size: int = 800, chunk_overlap: int = 150, **kwargs):
         """
         Initialize the chunker with a strategy and parameters.
 
