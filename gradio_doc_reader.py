@@ -2,31 +2,29 @@ import os
 import json
 import gradio as gr
 from extractor import PdfExtractor
-from chunking import ChunkGenerator
-from embedding import DocumentEmbedder
-from storeToQdrant import QdrantUploader
-from qdrant_client.http.models import Distance, VectorParams
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from document_processor import DocumentProcessor
+from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 import shutil
 
 # Load environment variables
 load_dotenv()
 openai_api_key = os.getenv("OPENAI_API_KEY")
+OPENAI_LLM_MODEL = "gpt-3.5-turbo"
 
 # Initialize global objects
-embedder = DocumentEmbedder(model="text-embedding-3-small")
-uploader = QdrantUploader(
+processor = DocumentProcessor(
     collection_name="aiml_vector_db",
-    qdrant_host="localhost",
-    qdrant_port=6333
+    chunk_strategy="semantic",
+    chunk_size=800,
+    chunk_overlap=150,
+    embedding_model="text-embedding-3-small",
+    batch_size=32
 )
-uploader.create_collection(vector_size=1536, distance=Distance.COSINE)
 
-# Initialize LLM with model and temperature
 llm = ChatOpenAI(
-    model="gpt-3.5-turbo",
-    temperature=0.7,
+    model=OPENAI_LLM_MODEL,
+    temperature=0.9,
     openai_api_key=openai_api_key
 )
 
@@ -34,15 +32,12 @@ llm = ChatOpenAI(
 SOURCE_DIR = "source_dir"
 CONVERTED_DIR = "converted_dir"
 PROCESSED_DIR = "processed_files"
-CHUNK_DIR = "chunked_docs"
-EMBEDDED_DIR = "embedded_docs"
 PROCESSED_TRACKER = "processed_files.json"
 JSON_ARCHIVE_DIR = os.path.join(PROCESSED_DIR, "json_files")
 
 # Ensure directories exist
-for dir_path in [SOURCE_DIR, CONVERTED_DIR, PROCESSED_DIR, CHUNK_DIR, EMBEDDED_DIR, JSON_ARCHIVE_DIR]:
+for dir_path in [SOURCE_DIR, CONVERTED_DIR, PROCESSED_DIR, JSON_ARCHIVE_DIR]:
     os.makedirs(dir_path, exist_ok=True)
-
 
 # Load or initialize processed files tracker
 def load_processed_files():
@@ -51,42 +46,23 @@ def load_processed_files():
             return json.load(f)
     return {"processed": []}
 
-
 def save_processed_files(processed_list):
     with open(PROCESSED_TRACKER, "w", encoding="utf-8") as f:
         json.dump(processed_list, f, indent=4)
 
-
-def cleanup_and_archive():
-    """Move all JSON files to PROCESSED_DIR/json_files and clean up directories."""
-    temp_dirs = [SOURCE_DIR, CONVERTED_DIR, CHUNK_DIR, EMBEDDED_DIR]
+def cleanup():
+    temp_dirs = [CONVERTED_DIR]
     for dir_path in temp_dirs:
         for filename in os.listdir(dir_path):
             file_path = os.path.join(dir_path, filename)
             if filename.endswith(".json"):
-                dest_path = os.path.join(JSON_ARCHIVE_DIR, filename)
-                base_name, ext = os.path.splitext(filename)
-                counter = 1
-                while os.path.exists(dest_path):
-                    dest_path = os.path.join(JSON_ARCHIVE_DIR, f"{base_name}_{counter}{ext}")
-                    counter += 1
-                shutil.move(file_path, dest_path)
-            elif filename.endswith(".pdf") and dir_path == SOURCE_DIR:
-                continue
-            else:
                 os.remove(file_path)
 
-
 def get_uploaded_files():
-    """Return a formatted string of processed files."""
     processed_files = load_processed_files()
-    if not processed_files["processed"]:
-        return "No files have been uploaded yet."
-    return "## Uploaded Files\n" + "\n".join([f"- {filename}" for filename in processed_files["processed"]])
-
+    return processed_files["processed"]
 
 def process_pdf(file):
-    """Process an uploaded PDF through the pipeline if not already processed."""
     try:
         filename = os.path.basename(file.name)
         processed_files = load_processed_files()
@@ -100,32 +76,73 @@ def process_pdf(file):
         extractor = PdfExtractor()
         extractor.extract_pdfs(SOURCE_DIR, CONVERTED_DIR, PROCESSED_DIR)
 
-        chunker = ChunkGenerator(strategy="recursive_char", chunk_size=800, chunk_overlap=150)
-        chunker.chunk_document(CONVERTED_DIR, CHUNK_DIR)
+        json_file = os.path.join(CONVERTED_DIR, os.path.splitext(filename)[0] + ".json")
+        with open(json_file, "r", encoding="utf-8") as f:
+            json_data = json.load(f)
 
-        embedder.embed_chunks(CHUNK_DIR, EMBEDDED_DIR)
-
-        uploader.upload_embeddings(EMBEDDED_DIR)
+        processor.process_document(json_data, filename)
 
         processed_files["processed"].append(filename)
         save_processed_files(processed_files)
 
-        cleanup_and_archive()
+        cleanup()
 
-        return (f"Successfully processed '{filename}' and uploaded to Qdrant. "
-                f"JSON files archived in {JSON_ARCHIVE_DIR}."), get_uploaded_files()
+        return f"Successfully processed '{filename}' and uploaded to Qdrant.", get_uploaded_files()
     except Exception as e:
         return f"Error processing PDF: {str(e)}", get_uploaded_files()
 
+def delete_pdfs(filenames):
+    try:
+        if not filenames:
+            return "No files selected for deletion.", get_uploaded_files()
+
+        processed_files = load_processed_files()
+        deleted_files = []
+        errors = []
+
+        for filename in filenames:
+            if filename not in processed_files["processed"]:
+                errors.append(f"File '{filename}' not found in processed list.")
+                continue
+
+            # Delete PDF from PROCESSED_DIR
+            pdf_path = os.path.join(PROCESSED_DIR, filename)
+            if os.path.exists(pdf_path):
+                os.remove(pdf_path)
+                print(f"Deleted PDF file: {pdf_path}")
+            else:
+                print(f"PDF file not found: {pdf_path}")
+
+            # Delete embeddings from Qdrant
+            remaining = processor.delete_by_source_file(filename)
+            if remaining == -1:
+                errors.append(f"Failed to delete embeddings for '{filename}'.")
+            elif remaining > 0:
+                errors.append(f"Some embeddings for '{filename}' were not deleted ({remaining} remain).")
+
+            # Update processed files tracker
+            processed_files["processed"].remove(filename)
+            deleted_files.append(filename)
+
+        save_processed_files(processed_files)
+
+        status = ""
+        if deleted_files:
+            status += f"Successfully deleted {len(deleted_files)} file(s): {', '.join(deleted_files)}."
+        if errors:
+            status += "\nErrors:\n" + "\n".join(errors)
+
+        return status, get_uploaded_files()
+    except Exception as e:
+        return f"Error deleting files: {str(e)}", get_uploaded_files()
 
 def search_qdrant(query):
-    """Search Qdrant and return formatted results as context and source files."""
     try:
-        query_embedding = embedder.embeddings.embed_query(query)
-        results = uploader.search(query_vector=query_embedding, limit=5)
+        query_embedding = processor.embeddings.embed_query(query)
+        results = processor.search(query_vector=query_embedding, limit=5)
 
         context = ""
-        source_files = set()  # Use a set to avoid duplicates
+        source_files = set()
         for i, result in enumerate(results):
             score = result.score
             text = result.payload.get("text", "No text available")
@@ -139,73 +156,74 @@ def search_qdrant(query):
     except Exception as e:
         return f"Error searching Qdrant: {str(e)}", set()
 
-
 def chatbot_response(message, history):
-    """Generate a response using LLM with Qdrant search results as context and include source filenames."""
     try:
-        # Get context and source files from Qdrant
         context, source_files = search_qdrant(message)
-
-        # Prepare the prompt for the LLM
         system_prompt = (
-                "You are a helpful assistant that answers questions based on the provided document context. "
-                "Use the following context to answer the user's question. If the context doesn't contain "
-                "relevant information, say so and provide a general response if applicable.\n\n"
-                "Context:\n" + context
+            "You are a helpful assistant that answers questions based on the provided document context. "
+            "Use the following context to answer the user's question. If the context doesn't contain "
+            "relevant information, say so and provide a general response if applicable.\n\n"
+            "Context:\n" + context
         )
 
-        # Convert history to OpenAI-style messages and append new message
         messages = [{"role": "system", "content": system_prompt}]
         for msg in history:
             messages.append({"role": "user", "content": msg["content"]}) if msg["role"] == "user" else \
                 messages.append({"role": "assistant", "content": msg["content"]})
         messages.append({"role": "user", "content": message})
 
-        # Get response from LLM
         response = llm.invoke(messages).content
-
-        # Append source filenames to the response
         if source_files:
             source_list = ", ".join(source_files)
             response += f"\n\nSources: {source_list}"
         else:
             response += "\n\nSources: None identified"
-
         return response
     except Exception as e:
         return f"Error generating response: {str(e)}\n\nSources: None identified"
 
-
 def chat_handler(message, history):
-    """Handle chatbot input and return updated history in messages format."""
     if history is None:
         history = []
-
     response = chatbot_response(message, history)
-    # Append new user message and assistant response in dictionary format
     history.append({"role": "user", "content": message})
     history.append({"role": "assistant", "content": response})
-    return history, ""  # Return updated history and clear the input box
-
+    return history, ""
 
 def clear_chat():
-    """Clear the chatbot history."""
     return []
 
-
 # Gradio Interface
-with gr.Blocks(title="Document Reader with Qdrant") as demo:
+with gr.Blocks(title="Document Reader") as demo:
     gr.Markdown("# Document Reader with Qdrant")
 
     with gr.Tab("Upload PDF"):
-        pdf_input = gr.File(label="Upload PDF", file_types=[".pdf"])
-        upload_output = gr.Textbox(label="Processing Status")
-        uploaded_files_display = gr.Markdown(label="Processed Files", value=get_uploaded_files())
-        upload_btn = gr.Button("Process PDF")
+        gr.Markdown("## Upload or Delete PDFs")
+        with gr.Row():
+            with gr.Column():
+                pdf_input = gr.File(label="Upload PDF", file_types=[".pdf"])
+                upload_btn = gr.Button("Process PDF")
+            with gr.Column():
+                delete_checkboxes = gr.CheckboxGroup(
+                    label="Select PDFs to Delete",
+                    choices=get_uploaded_files(),
+                    interactive=True
+                )
+                delete_btn = gr.Button("Delete Selected PDFs")
+        upload_output = gr.Textbox(label="Status")
+
+        # Upload PDF
         upload_btn.click(
             fn=process_pdf,
             inputs=pdf_input,
-            outputs=[upload_output, uploaded_files_display]
+            outputs=[upload_output, delete_checkboxes]
+        )
+
+        # Delete PDFs
+        delete_btn.click(
+            fn=delete_pdfs,
+            inputs=delete_checkboxes,
+            outputs=[upload_output, delete_checkboxes]
         )
 
     with gr.Tab("Search Documents"):
@@ -216,12 +234,10 @@ with gr.Blocks(title="Document Reader with Qdrant") as demo:
             placeholder="Ask anything about your uploaded documents...",
         )
         clear = gr.Button("Clear Chat")
-
-        # Handle chat submission
         msg.submit(
             fn=chat_handler,
             inputs=[msg, chatbot],
-            outputs=[chatbot, msg]  # Update chatbot and clear input
+            outputs=[chatbot, msg]
         )
         clear.click(
             fn=clear_chat,
@@ -229,5 +245,4 @@ with gr.Blocks(title="Document Reader with Qdrant") as demo:
             outputs=chatbot
         )
 
-# Launch the app
 demo.launch()

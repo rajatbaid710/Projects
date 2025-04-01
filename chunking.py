@@ -18,7 +18,7 @@ except OSError:
 
 
 class ChunkGenerator:
-    def __init__(self, strategy: str = "recursive_char", chunk_size: int = 800, chunk_overlap: int = 150, **kwargs):
+    def __init__(self, strategy: str = "semantic", chunk_size: int = 800, chunk_overlap: int = 150, **kwargs):
         """
         Initialize the chunker with a strategy and parameters.
 
@@ -154,7 +154,7 @@ if __name__ == "__main__":
     # Recursive character splitting (LangChain)
     #chunker = DocumentChunker(strategy="recursive_char", chunk_size=512, chunk_overlap=50, separators=["\n\n", "\n"])
     #chunker = DocumentChunker(strategy="sentence", chunk_size=512, chunk_overlap=50)
-    chunker = DocumentChunker(strategy="semantic", chunk_size=512, chunk_overlap=50)
+    chunker = ChunkGenerator(strategy="semantic", chunk_size=512, chunk_overlap=50)
     chunker.chunk_document("input_folder", "output_folder")
 
     # Other examples:
