@@ -119,12 +119,13 @@ def process_pdf(file):
 
 
 def search_qdrant(query):
-    """Search Qdrant and return formatted results as context."""
+    """Search Qdrant and return formatted results as context and source files."""
     try:
         query_embedding = embedder.embeddings.embed_query(query)
         results = uploader.search(query_vector=query_embedding, limit=5)
 
         context = ""
+        source_files = set()  # Use a set to avoid duplicates
         for i, result in enumerate(results):
             score = result.score
             text = result.payload.get("text", "No text available")
@@ -132,17 +133,18 @@ def search_qdrant(query):
             context += f"Result {i + 1} (Score: {score:.4f})\n"
             context += f"Source: {source_file}\n"
             context += f"Text: {text}\n\n"
+            source_files.add(source_file)
 
-        return context if context else "No relevant information found in the documents."
+        return context if context else "No relevant information found in the documents.", source_files
     except Exception as e:
-        return f"Error searching Qdrant: {str(e)}"
+        return f"Error searching Qdrant: {str(e)}", set()
 
 
 def chatbot_response(message, history):
-    """Generate a response using LLM with Qdrant search results as context."""
+    """Generate a response using LLM with Qdrant search results as context and include source filenames."""
     try:
-        # Get context from Qdrant
-        context = search_qdrant(message)
+        # Get context and source files from Qdrant
+        context, source_files = search_qdrant(message)
 
         # Prepare the prompt for the LLM
         system_prompt = (
@@ -160,10 +162,18 @@ def chatbot_response(message, history):
         messages.append({"role": "user", "content": message})
 
         # Get response from LLM
-        response = llm.invoke(messages)
-        return response.content
+        response = llm.invoke(messages).content
+
+        # Append source filenames to the response
+        if source_files:
+            source_list = ", ".join(source_files)
+            response += f"\n\nSources: {source_list}"
+        else:
+            response += "\n\nSources: None identified"
+
+        return response
     except Exception as e:
-        return f"Error generating response: {str(e)}"
+        return f"Error generating response: {str(e)}\n\nSources: None identified"
 
 
 def chat_handler(message, history):
