@@ -102,7 +102,7 @@ class DocumentProcessor:
                 "metadata": {
                     **metadata,
                     "chunk_start_index": i * (
-                                self.chunk_size - self.chunk_overlap) if self.chunk_strategy != "recursive_char" else getattr(
+                            self.chunk_size - self.chunk_overlap) if self.chunk_strategy != "recursive_char" else getattr(
                         chunk, 'start_index', 0),
                     "chunk_length": len(chunk)
                 }
@@ -124,7 +124,7 @@ class DocumentProcessor:
                         vector=embedding,
                         payload={
                             "text": chunk_data["text"],
-                            "source_file": chunk_data["source_file"],
+                            # "source_file": chunk_data["source_file"],
                             "original_chunk_id": chunk_data["chunk_id"],
                             "metadata": chunk_data["metadata"]
                         }
@@ -166,8 +166,8 @@ class DocumentProcessor:
     def search(self, query_vector: List[float], limit: int = 5):
         results = self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit,
             with_payload=True
         )
-        return results
+        return results.points

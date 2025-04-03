@@ -8,19 +8,19 @@ load_dotenv()
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
 # Generate embedding for query
-query = "crossroads"
+query = "tell me about the uber"
 query_embedding = embeddings.embed_query(query)
 
 # Define filter for matching source_file
-keywords = ["uber.pdf"]
-query_filter = Filter(
-    must=[
-        FieldCondition(
-            key="source_file",
-            match=MatchAny(any=keywords)
-        )
-    ]
-)
+# keywords = ["uber.pdf"]
+# query_filter = Filter(
+#     must=[
+#         FieldCondition(
+#             key="source_file",
+#             match=MatchAny(any=keywords)
+#         )
+#     ]
+# )
 source_file = "uber.pdf"
 
 filter_query = Filter(
@@ -32,7 +32,7 @@ collection_name = "aiml_vector_db"
 # Query Qdrant
 response = client.query_points(
     collection_name=collection_name,
-    # query=query_embedding,  # Use 'query' instead of 'query_vector'
+    query=query_embedding,  # Use 'query' instead of 'query_vector'
     # limit=5,
     with_payload=True,
     query_filter=filter_query,  # Correct argument name
@@ -40,17 +40,17 @@ response = client.query_points(
 )
 
 # Print response
-# print(response.model_dump_json())
+print(response.model_dump_json())
 
 # Iterate through response points
-for point in response.points:
-    print(f"Score: {point.score}, Summary: {point.id}")
+# for point in response.points:
+#     print(f"Score: {point.score}, Summary: {point.id}")
 
-pre_deleted_count = client.count(
-            collection_name=collection_name,
-            exact=False,
-            count_filter=filter_query
-        ).count
+# pre_deleted_count = client.count(
+#             collection_name=collection_name,
+#             exact=False,
+#             count_filter=filter_query
+#         ).count
 
 
 def delete_by_source_file(self, source_file: str) -> int:

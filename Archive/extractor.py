@@ -25,7 +25,6 @@ class PdfExtractor:
                 # Prepare metadata
                 metadata = {
                     "original_file_name": file,
-                    "input_path": file_path,
                     "conversion_date": datetime.now().isoformat(),
                     "output_format": "json",
                 }
@@ -39,10 +38,10 @@ class PdfExtractor:
                 }
 
                 # Save to JSON
-                output_file_name = os.path.splitext(file)[0] + ".json"
-                output_path = os.path.join(output_dir, output_file_name)
-                with open(output_path, "w", encoding="utf-8") as json_file:
-                    json.dump(output_data, json_file, indent=4, ensure_ascii=False)
+                # output_file_name = os.path.splitext(file)[0] + ".json"
+                # output_path = os.path.join(output_dir, output_file_name)
+                # with open(output_path, "w", encoding="utf-8") as json_file:
+                #     json.dump(output_data, json_file, indent=4, ensure_ascii=False)
 
                 # Move the processed PDF to processed_dir
                 processed_file_path = os.path.join(processed_dir, file)

@@ -1,11 +1,174 @@
 import os
 import json
 import gradio as gr
-from extractor import PdfExtractor
-from document_processor import DocumentProcessor
-from langchain_openai import ChatOpenAI
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from dotenv import load_dotenv
+import spacy
+import nltk
+from typing import List, Dict
 import shutil
+
+# Ensure required models are downloaded
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
+try:
+    spacy_nlp = spacy.load('en_core_web_sm')
+except OSError:
+    spacy.cli.download('en_core_web_sm')
+    spacy_nlp = spacy.load('en_core_web_sm')
+
+
+class DocumentProcessor:
+    def __init__(self,
+                 collection_name="aiml_vector_db",
+                 qdrant_host="localhost",
+                 qdrant_port=6333,
+                 chunk_strategy="semantic",
+                 chunk_size=800,
+                 chunk_overlap=150,
+                 embedding_model="text-embedding-3-small",
+                 batch_size=32):
+        load_dotenv()
+        self.client = QdrantClient(host=qdrant_host, port=qdrant_port)
+        self.collection_name = collection_name
+        self.next_id = 0
+        self._create_collection(vector_size=1536, distance=Distance.COSINE)
+        self.chunk_strategy = chunk_strategy.lower()
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        if self.chunk_strategy == "recursive_char":
+            self.splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                length_function=len,
+                add_start_index=True,
+                separators=["\n\n", "\n", ".", " ", ""]
+            ).split_text
+        elif self.chunk_strategy == "semantic":
+            self.splitter = lambda text: self._semantic_split(text)
+        else:
+            raise ValueError(f"Unsupported chunking strategy: {chunk_strategy}")
+        self.embeddings = OpenAIEmbeddings(
+            model=embedding_model,
+            openai_api_key=os.getenv("OPENAI_API_KEY")
+        )
+        self.batch_size = batch_size
+
+    def _create_collection(self, vector_size: int, distance=Distance.COSINE):
+        collections = self.client.get_collections().collections
+        if not any(col.name == self.collection_name for col in collections):
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(size=vector_size, distance=distance)
+            )
+            print(f"Created collection: {self.collection_name}")
+        else:
+            print(f"Collection {self.collection_name} already exists")
+
+    def _semantic_split(self, text: str) -> List[str]:
+        doc = spacy_nlp(text)
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        for sent in doc.sents:
+            if current_length + len(sent.text) > self.chunk_size and current_chunk:
+                chunks.append(" ".join(current_chunk))
+                current_chunk = [current_chunk[-1]] if self.chunk_overlap > 0 else []
+                current_length = len(current_chunk[0]) if current_chunk else 0
+            current_chunk.append(sent.text)
+            current_length += len(sent.text)
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+        return chunks
+
+    def process_document(self, json_data: Dict, source_file: str) -> None:
+        markdown_content = json_data["content"]["markdown"]
+        metadata = json_data["metadata"]
+        chunks = self.splitter(markdown_content)
+        if not chunks:
+            print(f"No chunks generated for {source_file}")
+            return
+
+        chunked_data = []
+        texts = []
+        for i, chunk in enumerate(chunks):
+            chunk_info = {
+                "chunk_id": i,
+                "text": chunk,
+                "source_file": source_file,
+                "metadata": {
+                    **metadata,
+                    "chunk_start_index": i * (
+                            self.chunk_size - self.chunk_overlap) if self.chunk_strategy != "recursive_char" else getattr(
+                        chunk, 'start_index', 0),
+                    "chunk_length": len(chunk)
+                }
+            }
+            chunked_data.append(chunk_info)
+            texts.append(chunk)
+
+        points = []
+        for i in range(0, len(texts), self.batch_size):
+            batch_texts = texts[i:i + self.batch_size]
+            embeddings = self.embeddings.embed_documents(batch_texts)
+            for j, embedding in enumerate(embeddings):
+                chunk_data = chunked_data[i + j]
+                point_id = self.next_id
+                self.next_id += 1
+                points.append(
+                    PointStruct(
+                        id=point_id,
+                        vector=embedding,
+                        payload={
+                            "text": chunk_data["text"],
+                            # "source_file": chunk_data["source_file"],
+                            "original_chunk_id": chunk_data["chunk_id"],
+                            "metadata": chunk_data["metadata"]
+                        }
+                    )
+                )
+
+        if points:
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=points
+            )
+            print(f"Uploaded {len(points)} points from {source_file} to {self.collection_name}")
+
+    def delete_by_source_file(self, source_file: str) -> int:
+        try:
+            filter_query = Filter(
+                must=[FieldCondition(key="source_file", match=MatchValue(value=source_file))]
+            )
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=filter_query
+            )
+            deleted_count = self.client.count(
+                collection_name=self.collection_name,
+                exact=False,
+                count_filter=filter_query
+            ).count
+            print(f"Deleted embeddings for {source_file} from {self.collection_name}")
+            return deleted_count
+        except Exception as e:
+            print(f"Error deleting embeddings for {source_file}: {str(e)}")
+            return -1
+
+    def search(self, query_vector: List[float], limit: int = 5):
+        results = self.client.query_points(
+            collection_name=self.collection_name,
+            query=query_vector,
+            limit=limit,
+            with_payload=True
+        )
+        return results.points
+
 
 # Load environment variables
 load_dotenv()
@@ -24,7 +187,7 @@ processor = DocumentProcessor(
 
 llm = ChatOpenAI(
     model=OPENAI_LLM_MODEL,
-    temperature=0.9,
+    temperature=0.2,
     openai_api_key=openai_api_key
 )
 
@@ -39,6 +202,7 @@ JSON_ARCHIVE_DIR = os.path.join(PROCESSED_DIR, "json_files")
 for dir_path in [SOURCE_DIR, CONVERTED_DIR, PROCESSED_DIR, JSON_ARCHIVE_DIR]:
     os.makedirs(dir_path, exist_ok=True)
 
+
 # Load or initialize processed files tracker
 def load_processed_files():
     if os.path.exists(PROCESSED_TRACKER):
@@ -46,9 +210,11 @@ def load_processed_files():
             return json.load(f)
     return {"processed": []}
 
+
 def save_processed_files(processed_list):
     with open(PROCESSED_TRACKER, "w", encoding="utf-8") as f:
         json.dump(processed_list, f, indent=4)
+
 
 def cleanup():
     temp_dirs = [CONVERTED_DIR]
@@ -58,9 +224,11 @@ def cleanup():
             if filename.endswith(".json"):
                 os.remove(file_path)
 
+
 def get_uploaded_files():
     processed_files = load_processed_files()
     return processed_files["processed"]
+
 
 def process_pdf(file):
     try:
@@ -73,11 +241,8 @@ def process_pdf(file):
         pdf_path = os.path.join(SOURCE_DIR, filename)
         shutil.copy(file.name, pdf_path)
 
-        extractor = PdfExtractor()
-        extractor.extract_pdfs(SOURCE_DIR, CONVERTED_DIR, PROCESSED_DIR)
-
         json_file = os.path.join(CONVERTED_DIR, os.path.splitext(filename)[0] + ".json")
-        with open(json_file, "r", encoding="utf-8") as f:
+        with open(file.name, "r", encoding="utf-8") as f:
             json_data = json.load(f)
 
         processor.process_document(json_data, filename)
@@ -90,6 +255,7 @@ def process_pdf(file):
         return f"Successfully processed '{filename}' and uploaded to Qdrant.", get_uploaded_files()
     except Exception as e:
         return f"Error processing PDF: {str(e)}", get_uploaded_files()
+
 
 def delete_pdfs(filenames):
     try:
@@ -105,7 +271,6 @@ def delete_pdfs(filenames):
                 errors.append(f"File '{filename}' not found in processed list.")
                 continue
 
-            # Delete PDF from PROCESSED_DIR
             pdf_path = os.path.join(PROCESSED_DIR, filename)
             if os.path.exists(pdf_path):
                 os.remove(pdf_path)
@@ -113,14 +278,12 @@ def delete_pdfs(filenames):
             else:
                 print(f"PDF file not found: {pdf_path}")
 
-            # Delete embeddings from Qdrant
             remaining = processor.delete_by_source_file(filename)
             if remaining == -1:
                 errors.append(f"Failed to delete embeddings for '{filename}'.")
             elif remaining > 0:
                 errors.append(f"Some embeddings for '{filename}' were not deleted ({remaining} remain).")
 
-            # Update processed files tracker
             processed_files["processed"].remove(filename)
             deleted_files.append(filename)
 
@@ -136,6 +299,7 @@ def delete_pdfs(filenames):
     except Exception as e:
         return f"Error deleting files: {str(e)}", get_uploaded_files()
 
+
 def search_qdrant(query):
     try:
         query_embedding = processor.embeddings.embed_query(query)
@@ -144,10 +308,8 @@ def search_qdrant(query):
         context = ""
         source_files = set()
         for i, result in enumerate(results):
-            score = result.score
             text = result.payload.get("text", "No text available")
             source_file = result.payload.get("source_file", "Unknown source")
-            context += f"Result {i + 1} (Score: {score:.4f})\n"
             context += f"Source: {source_file}\n"
             context += f"Text: {text}\n\n"
             source_files.add(source_file)
@@ -156,14 +318,16 @@ def search_qdrant(query):
     except Exception as e:
         return f"Error searching Qdrant: {str(e)}", set()
 
+
 def chatbot_response(message, history):
     try:
         context, source_files = search_qdrant(message)
+
         system_prompt = (
-            "You are a helpful assistant that answers questions based on the provided document context. "
-            "Use the following context to answer the user's question. If the context doesn't contain "
-            "relevant information, say so and provide a general response if applicable.\n\n"
-            "Context:\n" + context
+                "You are a helpful assistant that answers questions based on the provided document context. "
+                "Use the following context to answer the user's question. If the context doesn't contain "
+                "relevant information, say so and do not use external knowledge.\n\n"
+                "Context:\n" + context
         )
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -182,6 +346,7 @@ def chatbot_response(message, history):
     except Exception as e:
         return f"Error generating response: {str(e)}\n\nSources: None identified"
 
+
 def chat_handler(message, history):
     if history is None:
         history = []
@@ -190,8 +355,10 @@ def chat_handler(message, history):
     history.append({"role": "assistant", "content": response})
     return history, ""
 
+
 def clear_chat():
     return []
+
 
 # Gradio Interface
 with gr.Blocks(title="Document Reader") as demo:
@@ -212,14 +379,12 @@ with gr.Blocks(title="Document Reader") as demo:
                 delete_btn = gr.Button("Delete Selected PDFs")
         upload_output = gr.Textbox(label="Status")
 
-        # Upload PDF
         upload_btn.click(
             fn=process_pdf,
             inputs=pdf_input,
             outputs=[upload_output, delete_checkboxes]
         )
 
-        # Delete PDFs
         delete_btn.click(
             fn=delete_pdfs,
             inputs=delete_checkboxes,
@@ -245,4 +410,5 @@ with gr.Blocks(title="Document Reader") as demo:
             outputs=chatbot
         )
 
-demo.launch()
+if __name__ == "__main__":
+    demo.launch()
