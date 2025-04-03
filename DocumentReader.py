@@ -1,5 +1,5 @@
+from datetime import datetime
 import os
-import json
 import gradio as gr
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 import spacy
 import nltk
 from typing import List, Dict
-import shutil
+import PyPDF2
 
 # Ensure required models are downloaded
 try:
@@ -46,7 +46,6 @@ class DocumentProcessor:
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 length_function=len,
-                add_start_index=True,
                 separators=["\n\n", "\n", ".", " ", ""]
             ).split_text
         elif self.chunk_strategy == "semantic":
@@ -58,6 +57,7 @@ class DocumentProcessor:
             openai_api_key=os.getenv("OPENAI_API_KEY")
         )
         self.batch_size = batch_size
+        self.processed_files = self._fetch_processed_files()  # Fetch processed files on init
 
     def _create_collection(self, vector_size: int, distance=Distance.COSINE):
         collections = self.client.get_collections().collections
@@ -69,6 +69,41 @@ class DocumentProcessor:
             print(f"Created collection: {self.collection_name}")
         else:
             print(f"Collection {self.collection_name} already exists")
+
+    def _fetch_processed_files(self) -> set:
+        try:
+            processed_files = set()
+            scroll_result = self.client.scroll(
+                collection_name=self.collection_name,
+                limit=100,
+                with_payload=True,
+                scroll_filter=None
+            )
+            points, next_offset = scroll_result
+
+            while points:
+                for point in points:
+                    source_file = point.payload.get("source_file")
+                    if source_file:
+                        processed_files.add(source_file)
+
+                if next_offset is None:
+                    break
+
+                scroll_result = self.client.scroll(
+                    collection_name=self.collection_name,
+                    limit=100,
+                    offset=next_offset,
+                    with_payload=True,
+                    scroll_filter=None
+                )
+                points, next_offset = scroll_result
+
+            print(f"Fetched {len(processed_files)} processed files from Qdrant: {processed_files}")
+            return processed_files
+        except Exception as e:
+            print(f"Error fetching processed files from Qdrant: {str(e)}")
+            return set()
 
     def _semantic_split(self, text: str) -> List[str]:
         doc = spacy_nlp(text)
@@ -86,38 +121,19 @@ class DocumentProcessor:
             chunks.append(" ".join(current_chunk))
         return chunks
 
-    def process_document(self, json_data: Dict, source_file: str) -> None:
-        markdown_content = json_data["content"]["markdown"]
-        metadata = json_data["metadata"]
-        chunks = self.splitter(markdown_content)
+    def process_document(self, text: str, source_file: str) -> None:
+        # Split text into chunks directly
+        chunks = self.splitter(text)
         if not chunks:
             print(f"No chunks generated for {source_file}")
             return
 
-        chunked_data = []
-        texts = []
-        for i, chunk in enumerate(chunks):
-            chunk_info = {
-                "chunk_id": i,
-                "text": chunk,
-                "source_file": source_file,
-                "metadata": {
-                    **metadata,
-                    "chunk_start_index": i * (
-                            self.chunk_size - self.chunk_overlap) if self.chunk_strategy != "recursive_char" else getattr(
-                        chunk, 'start_index', 0),
-                    "chunk_length": len(chunk)
-                }
-            }
-            chunked_data.append(chunk_info)
-            texts.append(chunk)
-
         points = []
-        for i in range(0, len(texts), self.batch_size):
-            batch_texts = texts[i:i + self.batch_size]
-            embeddings = self.embeddings.embed_documents(batch_texts)
-            for j, embedding in enumerate(embeddings):
-                chunk_data = chunked_data[i + j]
+        # Process chunks in batches without storing intermediate data
+        for i in range(0, len(chunks), self.batch_size):
+            batch_chunks = chunks[i:i + self.batch_size]
+            embeddings = self.embeddings.embed_documents(batch_chunks)
+            for j, (chunk, embedding) in enumerate(zip(batch_chunks, embeddings)):
                 point_id = self.next_id
                 self.next_id += 1
                 points.append(
@@ -125,10 +141,10 @@ class DocumentProcessor:
                         id=point_id,
                         vector=embedding,
                         payload={
-                            "text": chunk_data["text"],
-                            # "source_file": chunk_data["source_file"],
-                            "original_chunk_id": chunk_data["chunk_id"],
-                            "metadata": chunk_data["metadata"]
+                            "text": chunk,  # Store text in payload
+                            "source_file": source_file,  # Store source file in payload
+                            "chunk_id": i + j, # Optional: store chunk index if needed
+                            "conversion_date": datetime.now().isoformat()
                         }
                     )
                 )
@@ -138,6 +154,7 @@ class DocumentProcessor:
                 collection_name=self.collection_name,
                 points=points
             )
+            self.processed_files.add(source_file)
             print(f"Uploaded {len(points)} points from {source_file} to {self.collection_name}")
 
     def delete_by_source_file(self, source_file: str) -> int:
@@ -154,6 +171,8 @@ class DocumentProcessor:
                 exact=False,
                 count_filter=filter_query
             ).count
+            if source_file in self.processed_files:
+                self.processed_files.remove(source_file)
             print(f"Deleted embeddings for {source_file} from {self.collection_name}")
             return deleted_count
         except Exception as e:
@@ -168,6 +187,9 @@ class DocumentProcessor:
             with_payload=True
         )
         return results.points
+
+    def get_processed_files(self):
+        return list(self.processed_files)
 
 
 # Load environment variables
@@ -191,103 +213,47 @@ llm = ChatOpenAI(
     openai_api_key=openai_api_key
 )
 
-# Directories
-SOURCE_DIR = "source_dir"
-CONVERTED_DIR = "converted_dir"
-PROCESSED_DIR = "processed_files"
-PROCESSED_TRACKER = "processed_files.json"
-JSON_ARCHIVE_DIR = os.path.join(PROCESSED_DIR, "json_files")
 
-# Ensure directories exist
-for dir_path in [SOURCE_DIR, CONVERTED_DIR, PROCESSED_DIR, JSON_ARCHIVE_DIR]:
-    os.makedirs(dir_path, exist_ok=True)
-
-
-# Load or initialize processed files tracker
-def load_processed_files():
-    if os.path.exists(PROCESSED_TRACKER):
-        with open(PROCESSED_TRACKER, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"processed": []}
-
-
-def save_processed_files(processed_list):
-    with open(PROCESSED_TRACKER, "w", encoding="utf-8") as f:
-        json.dump(processed_list, f, indent=4)
-
-
-def cleanup():
-    temp_dirs = [CONVERTED_DIR]
-    for dir_path in temp_dirs:
-        for filename in os.listdir(dir_path):
-            file_path = os.path.join(dir_path, filename)
-            if filename.endswith(".json"):
-                os.remove(file_path)
-
-
-def get_uploaded_files():
-    processed_files = load_processed_files()
-    return processed_files["processed"]
-
-
-def process_pdf(file):
+def process_pdf(file, current_files):
     try:
         filename = os.path.basename(file.name)
-        processed_files = load_processed_files()
+        if filename in processor.processed_files:
+            return f"File '{filename}' has already been processed and uploaded to Qdrant.", current_files, current_files
 
-        if filename in processed_files["processed"]:
-            return f"File '{filename}' has already been processed and uploaded to Qdrant.", get_uploaded_files()
+        with open(file.name, 'rb') as f:
+            pdf_reader = PyPDF2.PdfReader(f)
+            text_content = ""
+            for page in pdf_reader.pages:
+                text_content += page.extract_text() or ""
 
-        pdf_path = os.path.join(SOURCE_DIR, filename)
-        shutil.copy(file.name, pdf_path)
+        processor.process_document(text_content, filename)
 
-        json_file = os.path.join(CONVERTED_DIR, os.path.splitext(filename)[0] + ".json")
-        with open(file.name, "r", encoding="utf-8") as f:
-            json_data = json.load(f)
-
-        processor.process_document(json_data, filename)
-
-        processed_files["processed"].append(filename)
-        save_processed_files(processed_files)
-
-        cleanup()
-
-        return f"Successfully processed '{filename}' and uploaded to Qdrant.", get_uploaded_files()
+        updated_files = processor.get_processed_files()
+        return f"Successfully processed '{filename}' and uploaded to Qdrant.", updated_files, updated_files
     except Exception as e:
-        return f"Error processing PDF: {str(e)}", get_uploaded_files()
+        return f"Error processing PDF: {str(e)}", current_files, current_files
 
 
-def delete_pdfs(filenames):
+def delete_pdfs(filenames, current_files):
     try:
         if not filenames:
-            return "No files selected for deletion.", get_uploaded_files()
+            return "No files selected for deletion.", current_files, current_files
 
-        processed_files = load_processed_files()
         deleted_files = []
         errors = []
 
         for filename in filenames:
-            if filename not in processed_files["processed"]:
+            if filename not in processor.processed_files:
                 errors.append(f"File '{filename}' not found in processed list.")
                 continue
-
-            pdf_path = os.path.join(PROCESSED_DIR, filename)
-            if os.path.exists(pdf_path):
-                os.remove(pdf_path)
-                print(f"Deleted PDF file: {pdf_path}")
-            else:
-                print(f"PDF file not found: {pdf_path}")
 
             remaining = processor.delete_by_source_file(filename)
             if remaining == -1:
                 errors.append(f"Failed to delete embeddings for '{filename}'.")
             elif remaining > 0:
                 errors.append(f"Some embeddings for '{filename}' were not deleted ({remaining} remain).")
-
-            processed_files["processed"].remove(filename)
-            deleted_files.append(filename)
-
-        save_processed_files(processed_files)
+            else:
+                deleted_files.append(filename)
 
         status = ""
         if deleted_files:
@@ -295,9 +261,14 @@ def delete_pdfs(filenames):
         if errors:
             status += "\nErrors:\n" + "\n".join(errors)
 
-        return status, get_uploaded_files()
+        updated_files = processor.get_processed_files()
+        return status, updated_files, updated_files
     except Exception as e:
-        return f"Error deleting files: {str(e)}", get_uploaded_files()
+        return f"Error deleting files: {str(e)}", current_files, current_files
+
+
+def update_checkbox_choices(file_list):
+    return file_list
 
 
 def search_qdrant(query):
@@ -366,6 +337,9 @@ with gr.Blocks(title="Document Reader") as demo:
 
     with gr.Tab("Upload PDF"):
         gr.Markdown("## Upload or Delete PDFs")
+
+        file_state = gr.State(value=processor.get_processed_files())
+
         with gr.Row():
             with gr.Column():
                 pdf_input = gr.File(label="Upload PDF", file_types=[".pdf"])
@@ -373,7 +347,8 @@ with gr.Blocks(title="Document Reader") as demo:
             with gr.Column():
                 delete_checkboxes = gr.CheckboxGroup(
                     label="Select PDFs to Delete",
-                    choices=get_uploaded_files(),
+                    value=[],
+                    choices=processor.get_processed_files(),
                     interactive=True
                 )
                 delete_btn = gr.Button("Delete Selected PDFs")
@@ -381,14 +356,22 @@ with gr.Blocks(title="Document Reader") as demo:
 
         upload_btn.click(
             fn=process_pdf,
-            inputs=pdf_input,
-            outputs=[upload_output, delete_checkboxes]
+            inputs=[pdf_input, file_state],
+            outputs=[upload_output, delete_checkboxes, file_state]
+        ).then(
+            fn=update_checkbox_choices,
+            inputs=[file_state],
+            outputs=[delete_checkboxes]
         )
 
         delete_btn.click(
             fn=delete_pdfs,
-            inputs=delete_checkboxes,
-            outputs=[upload_output, delete_checkboxes]
+            inputs=[delete_checkboxes, file_state],
+            outputs=[upload_output, delete_checkboxes, file_state]
+        ).then(
+            fn=update_checkbox_choices,
+            inputs=[file_state],
+            outputs=[delete_checkboxes]
         )
 
     with gr.Tab("Search Documents"):
