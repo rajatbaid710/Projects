@@ -11,6 +11,7 @@ from typing import List
 import PyPDF2
 import uuid
 import time
+import hashlib
 
 # User dictionary with emails as keys
 users = {
@@ -132,9 +133,28 @@ class DocumentProcessor:
             chunks.append(" ".join(current_chunk))
         return chunks
 
-    def process_document(self, text: str, source_file: str, user_email: str) -> None:
+    def process_document(self, text: str, source_file: str, user_email: str) -> str:
         doc_size = len(text)
         print(f"Document size for '{source_file}': {doc_size} characters")
+
+        content_hash = hashlib.sha256(f"{text}{user_email}".encode()).hexdigest()
+
+        existing_points = self.client.scroll(
+            collection_name=self.collection_name,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="user_email", match=MatchValue(value=user_email)),
+                    FieldCondition(key="content_hash", match=MatchValue(value=content_hash))
+                ]
+            ),
+            limit=1,
+            with_payload=True
+        )[0]
+
+        if existing_points:
+            existing_file = existing_points[0].payload.get("source_file", "unknown file")
+            print(f"Duplicate content detected for '{source_file}' by {user_email}. Found in '{existing_file}'.")
+            return f"A similar document already exists as '{existing_file}' for {user_email}. Upload skipped."
 
         start_time = time.time()
         chunks = self.splitter(text)
@@ -143,7 +163,7 @@ class DocumentProcessor:
 
         if not chunks:
             print(f"No chunks generated for {source_file}")
-            return
+            return f"No chunks generated for '{source_file}'. Upload failed."
 
         points = []
         start_time = time.time()
@@ -160,7 +180,8 @@ class DocumentProcessor:
                         payload={
                             "text": chunk,
                             "source_file": source_file,
-                            "user_email": user_email
+                            "user_email": user_email,
+                            "content_hash": content_hash
                         }
                     )
                 )
@@ -178,6 +199,9 @@ class DocumentProcessor:
 
             self.processed_files[source_file] = user_email
             print(f"Uploaded {len(points)} points from {source_file} by user {user_email} to {self.collection_name}")
+            return f"Successfully processed '{source_file}' by {user_email} and uploaded to Qdrant."
+
+        return f"Unexpected error processing '{source_file}'. No points generated."
 
     def delete_by_source_file(self, source_file: str) -> int:
         try:
@@ -243,8 +267,6 @@ def process_pdf(file, current_files, selected_user_email):
     try:
         filename = os.path.basename(file.name)
         user_email = selected_user_email
-        if filename in processor.processed_files and processor.processed_files[filename] == user_email:
-            return f"File '{filename}' has already been processed by {user_email}.", current_files, current_files
 
         with open(file.name, 'rb') as f:
             pdf_reader = PyPDF2.PdfReader(f)
@@ -252,10 +274,14 @@ def process_pdf(file, current_files, selected_user_email):
             for page in pdf_reader.pages:
                 text_content += page.extract_text() or ""
 
-        processor.process_document(text_content, filename, user_email)
+        status_message = processor.process_document(text_content, filename, user_email)
 
-        updated_files = processor.get_processed_files(user_email)
-        return f"Successfully processed '{filename}' by {user_email} and uploaded to Qdrant.", updated_files, updated_files
+        if "Successfully processed" in status_message:
+            updated_files = processor.get_processed_files(user_email)
+            return status_message, updated_files, updated_files
+        else:
+            return status_message, current_files, current_files
+
     except Exception as e:
         return f"Error processing PDF: {str(e)}", current_files, current_files
 
@@ -338,7 +364,6 @@ def chatbot_response(message, history, selected_user_email):
 
         response = llm.invoke(messages).content
 
-        # Append sources only if they exist and only once
         if source_files and "Sources:" not in response:
             source_list = ", ".join(source_files)
             response += f"\n\nSources: {source_list}"
@@ -372,10 +397,9 @@ with gr.Blocks(title="Document Reader") as demo:
     gr.Markdown("# Document Reader with Qdrant")
 
     file_state = gr.State(value=processor.get_processed_files())
-    user_state = gr.State(value="john.doe123@example.com")  # Default user email
+    user_state = gr.State(value="john.doe123@example.com")
 
     with gr.Row():
-        # Left Side: Chat Section
         with gr.Column(scale=1):
             gr.Markdown("## Chat with Your Documents")
             chatbot = gr.Chatbot(label="Document Chatbot", type="messages", height=400)
@@ -397,26 +421,22 @@ with gr.Blocks(title="Document Reader") as demo:
                 outputs=chatbot
             )
 
-        # Right Side: Upload and Manage Documents
         with gr.Column(scale=1):
-            # User Selection
             with gr.Group():
                 gr.Markdown("## Select User")
                 user_dropdown = gr.Dropdown(
                     label="User",
-                    choices=list(users.keys()),  # Display emails
-                    value="john.doe123@example.com",  # Default email
+                    choices=list(users.keys()),
+                    value="john.doe123@example.com",
                     interactive=True
                 )
 
-            # Upload PDF Section
             with gr.Group():
                 gr.Markdown("## Upload PDF")
                 pdf_input = gr.File(label="Upload PDF", file_types=[".pdf"])
                 upload_btn = gr.Button("Process PDF")
                 upload_output = gr.Textbox(label="Status")
 
-            # Manage Documents Section
             with gr.Group():
                 gr.Markdown("## Manage Documents")
                 delete_checkboxes = gr.CheckboxGroup(
@@ -427,7 +447,6 @@ with gr.Blocks(title="Document Reader") as demo:
                 )
                 delete_btn = gr.Button("Delete Selected PDFs")
 
-    # Event Handlers
     user_dropdown.change(
         fn=update_file_list,
         inputs=[user_dropdown],
