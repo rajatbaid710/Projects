@@ -1,4 +1,3 @@
-from datetime import datetime
 import os
 import gradio as gr
 from qdrant_client import QdrantClient
@@ -8,8 +7,19 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from dotenv import load_dotenv
 import spacy
 import nltk
-from typing import List, Dict
+from typing import List
 import PyPDF2
+import uuid
+import time
+
+# User dictionary with emails as keys
+users = {
+    "john.doe123@example.com": {"username": "User1", "id": str(uuid.uuid4())},
+    "jane.smith456@example.com": {"username": "User2", "id": str(uuid.uuid4())},
+    "bob.jones789@example.com": {"username": "User3", "id": str(uuid.uuid4())},
+    "alice.brown321@example.com": {"username": "User4", "id": str(uuid.uuid4())},
+    "mike.wilson654@example.com": {"username": "User5", "id": str(uuid.uuid4())}
+}
 
 # Ensure required models are downloaded
 try:
@@ -57,7 +67,7 @@ class DocumentProcessor:
             openai_api_key=os.getenv("OPENAI_API_KEY")
         )
         self.batch_size = batch_size
-        self.processed_files = self._fetch_processed_files()  # Fetch processed files on init
+        self.processed_files = self._fetch_processed_files()
 
     def _create_collection(self, vector_size: int, distance=Distance.COSINE):
         collections = self.client.get_collections().collections
@@ -70,9 +80,9 @@ class DocumentProcessor:
         else:
             print(f"Collection {self.collection_name} already exists")
 
-    def _fetch_processed_files(self) -> set:
+    def _fetch_processed_files(self) -> dict:
         try:
-            processed_files = set()
+            processed_files = {}
             scroll_result = self.client.scroll(
                 collection_name=self.collection_name,
                 limit=100,
@@ -84,8 +94,9 @@ class DocumentProcessor:
             while points:
                 for point in points:
                     source_file = point.payload.get("source_file")
-                    if source_file:
-                        processed_files.add(source_file)
+                    user_email = point.payload.get("user_email")
+                    if source_file and user_email:
+                        processed_files[source_file] = user_email
 
                 if next_offset is None:
                     break
@@ -103,7 +114,7 @@ class DocumentProcessor:
             return processed_files
         except Exception as e:
             print(f"Error fetching processed files from Qdrant: {str(e)}")
-            return set()
+            return {}
 
     def _semantic_split(self, text: str) -> List[str]:
         doc = spacy_nlp(text)
@@ -121,15 +132,21 @@ class DocumentProcessor:
             chunks.append(" ".join(current_chunk))
         return chunks
 
-    def process_document(self, text: str, source_file: str) -> None:
-        # Split text into chunks directly
+    def process_document(self, text: str, source_file: str, user_email: str) -> None:
+        doc_size = len(text)
+        print(f"Document size for '{source_file}': {doc_size} characters")
+
+        start_time = time.time()
         chunks = self.splitter(text)
+        chunk_time = time.time() - start_time
+        print(f"Time taken to chunk '{source_file}': {chunk_time:.2f} seconds")
+
         if not chunks:
             print(f"No chunks generated for {source_file}")
             return
 
         points = []
-        # Process chunks in batches without storing intermediate data
+        start_time = time.time()
         for i in range(0, len(chunks), self.batch_size):
             batch_chunks = chunks[i:i + self.batch_size]
             embeddings = self.embeddings.embed_documents(batch_chunks)
@@ -141,21 +158,26 @@ class DocumentProcessor:
                         id=point_id,
                         vector=embedding,
                         payload={
-                            "text": chunk,  # Store text in payload
-                            "source_file": source_file,  # Store source file in payload
-                            "chunk_id": i + j, # Optional: store chunk index if needed
-                            "conversion_date": datetime.now().isoformat()
+                            "text": chunk,
+                            "source_file": source_file,
+                            "user_email": user_email
                         }
                     )
                 )
+        embed_time = time.time() - start_time
+        print(f"Time taken to embed '{source_file}': {embed_time:.2f} seconds")
 
         if points:
+            start_time = time.time()
             self.client.upsert(
                 collection_name=self.collection_name,
                 points=points
             )
-            self.processed_files.add(source_file)
-            print(f"Uploaded {len(points)} points from {source_file} to {self.collection_name}")
+            upload_time = time.time() - start_time
+            print(f"Time taken to upload '{source_file}' to DB: {upload_time:.2f} seconds")
+
+            self.processed_files[source_file] = user_email
+            print(f"Uploaded {len(points)} points from {source_file} by user {user_email} to {self.collection_name}")
 
     def delete_by_source_file(self, source_file: str) -> int:
         try:
@@ -172,24 +194,27 @@ class DocumentProcessor:
                 count_filter=filter_query
             ).count
             if source_file in self.processed_files:
-                self.processed_files.remove(source_file)
+                del self.processed_files[source_file]
             print(f"Deleted embeddings for {source_file} from {self.collection_name}")
             return deleted_count
         except Exception as e:
             print(f"Error deleting embeddings for {source_file}: {str(e)}")
             return -1
 
-    def search(self, query_vector: List[float], limit: int = 5):
+    def search(self, query_vector: List[float], user_email: str, limit: int = 5):
         results = self.client.query_points(
             collection_name=self.collection_name,
             query=query_vector,
+            query_filter=Filter(must=[FieldCondition(key="user_email", match=MatchValue(value=user_email))]),
             limit=limit,
             with_payload=True
         )
         return results.points
 
-    def get_processed_files(self):
-        return list(self.processed_files)
+    def get_processed_files(self, user_email: str = None):
+        if user_email:
+            return [file for file, email in self.processed_files.items() if email == user_email]
+        return list(self.processed_files.keys())
 
 
 # Load environment variables
@@ -214,11 +239,12 @@ llm = ChatOpenAI(
 )
 
 
-def process_pdf(file, current_files):
+def process_pdf(file, current_files, selected_user_email):
     try:
         filename = os.path.basename(file.name)
-        if filename in processor.processed_files:
-            return f"File '{filename}' has already been processed and uploaded to Qdrant.", current_files, current_files
+        user_email = selected_user_email
+        if filename in processor.processed_files and processor.processed_files[filename] == user_email:
+            return f"File '{filename}' has already been processed by {user_email}.", current_files, current_files
 
         with open(file.name, 'rb') as f:
             pdf_reader = PyPDF2.PdfReader(f)
@@ -226,25 +252,26 @@ def process_pdf(file, current_files):
             for page in pdf_reader.pages:
                 text_content += page.extract_text() or ""
 
-        processor.process_document(text_content, filename)
+        processor.process_document(text_content, filename, user_email)
 
-        updated_files = processor.get_processed_files()
-        return f"Successfully processed '{filename}' and uploaded to Qdrant.", updated_files, updated_files
+        updated_files = processor.get_processed_files(user_email)
+        return f"Successfully processed '{filename}' by {user_email} and uploaded to Qdrant.", updated_files, updated_files
     except Exception as e:
         return f"Error processing PDF: {str(e)}", current_files, current_files
 
 
-def delete_pdfs(filenames, current_files):
+def delete_pdfs(filenames, current_files, selected_user_email):
     try:
         if not filenames:
             return "No files selected for deletion.", current_files, current_files
 
+        user_email = selected_user_email
         deleted_files = []
         errors = []
 
         for filename in filenames:
-            if filename not in processor.processed_files:
-                errors.append(f"File '{filename}' not found in processed list.")
+            if filename not in processor.processed_files or processor.processed_files[filename] != user_email:
+                errors.append(f"File '{filename}' not found or not owned by {user_email}.")
                 continue
 
             remaining = processor.delete_by_source_file(filename)
@@ -261,7 +288,7 @@ def delete_pdfs(filenames, current_files):
         if errors:
             status += "\nErrors:\n" + "\n".join(errors)
 
-        updated_files = processor.get_processed_files()
+        updated_files = processor.get_processed_files(user_email)
         return status, updated_files, updated_files
     except Exception as e:
         return f"Error deleting files: {str(e)}", current_files, current_files
@@ -271,10 +298,11 @@ def update_checkbox_choices(file_list):
     return file_list
 
 
-def search_qdrant(query):
+def search_qdrant(query, selected_user_email):
     try:
+        user_email = selected_user_email
         query_embedding = processor.embeddings.embed_query(query)
-        results = processor.search(query_vector=query_embedding, limit=5)
+        results = processor.search(query_vector=query_embedding, user_email=user_email, limit=5)
 
         context = ""
         source_files = set()
@@ -285,20 +313,21 @@ def search_qdrant(query):
             context += f"Text: {text}\n\n"
             source_files.add(source_file)
 
-        return context if context else "No relevant information found in the documents.", source_files
+        return context if context else "No relevant information found in your documents.", source_files
     except Exception as e:
         return f"Error searching Qdrant: {str(e)}", set()
 
 
-def chatbot_response(message, history):
+def chatbot_response(message, history, selected_user_email):
     try:
-        context, source_files = search_qdrant(message)
+        context, source_files = search_qdrant(message, selected_user_email)
 
         system_prompt = (
-                "You are a helpful assistant that answers questions based on the provided document context. "
-                "Use the following context to answer the user's question. If the context doesn't contain "
-                "relevant information, say so and do not use external knowledge.\n\n"
-                "Context:\n" + context
+            "You are a helpful assistant that answers questions based on the provided document context. "
+            "Use the following context to answer the user's question. If the context doesn't contain "
+            "relevant information, say so and do not use external knowledge. Do not include source "
+            "information in your response; it will be appended separately.\n\n"
+            "Context:\n" + context
         )
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -308,20 +337,23 @@ def chatbot_response(message, history):
         messages.append({"role": "user", "content": message})
 
         response = llm.invoke(messages).content
-        if source_files:
+
+        # Append sources only if they exist and only once
+        if source_files and "Sources:" not in response:
             source_list = ", ".join(source_files)
             response += f"\n\nSources: {source_list}"
-        else:
+        elif not source_files and "Sources:" not in response:
             response += "\n\nSources: None identified"
+
         return response
     except Exception as e:
         return f"Error generating response: {str(e)}\n\nSources: None identified"
 
 
-def chat_handler(message, history):
+def chat_handler(message, history, selected_user_email):
     if history is None:
         history = []
-    response = chatbot_response(message, history)
+    response = chatbot_response(message, history, selected_user_email)
     history.append({"role": "user", "content": message})
     history.append({"role": "assistant", "content": response})
     return history, ""
@@ -331,67 +363,100 @@ def clear_chat():
     return []
 
 
+def update_file_list(selected_user_email):
+    return processor.get_processed_files(selected_user_email)
+
+
 # Gradio Interface
 with gr.Blocks(title="Document Reader") as demo:
     gr.Markdown("# Document Reader with Qdrant")
 
-    with gr.Tab("Upload PDF"):
-        gr.Markdown("## Upload or Delete PDFs")
+    file_state = gr.State(value=processor.get_processed_files())
+    user_state = gr.State(value="john.doe123@example.com")  # Default user email
 
-        file_state = gr.State(value=processor.get_processed_files())
+    with gr.Row():
+        # Left Side: Chat Section
+        with gr.Column(scale=1):
+            gr.Markdown("## Chat with Your Documents")
+            chatbot = gr.Chatbot(label="Document Chatbot", type="messages", height=400)
+            msg = gr.Textbox(
+                label="Your Message",
+                placeholder="Ask anything about your uploaded documents..."
+            )
+            with gr.Row():
+                submit_btn = gr.Button("Submit")
+                clear_btn = gr.Button("Clear Chat")
+            submit_btn.click(
+                fn=chat_handler,
+                inputs=[msg, chatbot, user_state],
+                outputs=[chatbot, msg]
+            )
+            clear_btn.click(
+                fn=clear_chat,
+                inputs=None,
+                outputs=chatbot
+            )
 
-        with gr.Row():
-            with gr.Column():
+        # Right Side: Upload and Manage Documents
+        with gr.Column(scale=1):
+            # User Selection
+            with gr.Group():
+                gr.Markdown("## Select User")
+                user_dropdown = gr.Dropdown(
+                    label="User",
+                    choices=list(users.keys()),  # Display emails
+                    value="john.doe123@example.com",  # Default email
+                    interactive=True
+                )
+
+            # Upload PDF Section
+            with gr.Group():
+                gr.Markdown("## Upload PDF")
                 pdf_input = gr.File(label="Upload PDF", file_types=[".pdf"])
                 upload_btn = gr.Button("Process PDF")
-            with gr.Column():
+                upload_output = gr.Textbox(label="Status")
+
+            # Manage Documents Section
+            with gr.Group():
+                gr.Markdown("## Manage Documents")
                 delete_checkboxes = gr.CheckboxGroup(
                     label="Select PDFs to Delete",
                     value=[],
-                    choices=processor.get_processed_files(),
+                    choices=processor.get_processed_files("john.doe123@example.com"),
                     interactive=True
                 )
                 delete_btn = gr.Button("Delete Selected PDFs")
-        upload_output = gr.Textbox(label="Status")
 
-        upload_btn.click(
-            fn=process_pdf,
-            inputs=[pdf_input, file_state],
-            outputs=[upload_output, delete_checkboxes, file_state]
-        ).then(
-            fn=update_checkbox_choices,
-            inputs=[file_state],
-            outputs=[delete_checkboxes]
-        )
+    # Event Handlers
+    user_dropdown.change(
+        fn=update_file_list,
+        inputs=[user_dropdown],
+        outputs=[delete_checkboxes]
+    ).then(
+        fn=lambda x: x,
+        inputs=[user_dropdown],
+        outputs=[user_state]
+    )
 
-        delete_btn.click(
-            fn=delete_pdfs,
-            inputs=[delete_checkboxes, file_state],
-            outputs=[upload_output, delete_checkboxes, file_state]
-        ).then(
-            fn=update_checkbox_choices,
-            inputs=[file_state],
-            outputs=[delete_checkboxes]
-        )
+    upload_btn.click(
+        fn=process_pdf,
+        inputs=[pdf_input, file_state, user_state],
+        outputs=[upload_output, delete_checkboxes, file_state]
+    ).then(
+        fn=update_checkbox_choices,
+        inputs=[file_state],
+        outputs=[delete_checkboxes]
+    )
 
-    with gr.Tab("Search Documents"):
-        gr.Markdown("## Chat with Your Documents")
-        chatbot = gr.Chatbot(label="Document Chatbot", type="messages")
-        msg = gr.Textbox(
-            label="Your Message",
-            placeholder="Ask anything about your uploaded documents...",
-        )
-        clear = gr.Button("Clear Chat")
-        msg.submit(
-            fn=chat_handler,
-            inputs=[msg, chatbot],
-            outputs=[chatbot, msg]
-        )
-        clear.click(
-            fn=clear_chat,
-            inputs=None,
-            outputs=chatbot
-        )
+    delete_btn.click(
+        fn=delete_pdfs,
+        inputs=[delete_checkboxes, file_state, user_state],
+        outputs=[upload_output, delete_checkboxes, file_state]
+    ).then(
+        fn=update_checkbox_choices,
+        inputs=[file_state],
+        outputs=[delete_checkboxes]
+    )
 
 if __name__ == "__main__":
     demo.launch()
