@@ -342,7 +342,7 @@ def delete_pdfs(filenames, current_files, selected_user_email):
 def update_checkbox_choices(file_list):
     return file_list
 
-
+#search the qd db
 def search_qdrant(query, selected_user_email):
     try:
         user_email = selected_user_email
