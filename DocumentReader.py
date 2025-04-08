@@ -13,13 +13,14 @@ import uuid
 import time
 import hashlib
 
-# User dictionary with emails as keys
+# User dictionary with emails as keys, including org and admin
 users = {
-    "john.doe123@example.com": {"username": "User1", "id": str(uuid.uuid4())},
-    "jane.smith456@example.com": {"username": "User2", "id": str(uuid.uuid4())},
-    "bob.jones789@example.com": {"username": "User3", "id": str(uuid.uuid4())},
-    "alice.brown321@example.com": {"username": "User4", "id": str(uuid.uuid4())},
-    "mike.wilson654@example.com": {"username": "User5", "id": str(uuid.uuid4())}
+    "john.doe123@example.com": {"username": "User1", "id": str(uuid.uuid4()), "org": "Org1"},
+    "jane.smith456@example.com": {"username": "User2", "id": str(uuid.uuid4()), "org": "Org1"},
+    "bob.jones789@example.com": {"username": "User3", "id": str(uuid.uuid4()), "org": "Org2"},
+    "alice.brown321@example.com": {"username": "User4", "id": str(uuid.uuid4()), "org": "Org2"},
+    "mike.wilson654@example.com": {"username": "User5", "id": str(uuid.uuid4()), "org": "Org2"},
+    "admin@example.com": {"username": "Admin", "id": str(uuid.uuid4()), "org": None}  # Admin has no org
 }
 
 # Ensure required models are downloaded
@@ -138,6 +139,7 @@ class DocumentProcessor:
         print(f"Document size for '{source_file}': {doc_size} characters")
 
         content_hash = hashlib.sha256(f"{text}{user_email}".encode()).hexdigest()
+        org = users[user_email]["org"] if user_email != "admin@example.com" else None
 
         existing_points = self.client.scroll(
             collection_name=self.collection_name,
@@ -181,7 +183,8 @@ class DocumentProcessor:
                             "text": chunk,
                             "source_file": source_file,
                             "user_email": user_email,
-                            "content_hash": content_hash
+                            "content_hash": content_hash,
+                            "org": org  # Add organization to payload
                         }
                     )
                 )
@@ -226,18 +229,32 @@ class DocumentProcessor:
             return -1
 
     def search(self, query_vector: List[float], user_email: str, limit: int = 5):
-        results = self.client.query_points(
-            collection_name=self.collection_name,
-            query=query_vector,
-            query_filter=Filter(must=[FieldCondition(key="user_email", match=MatchValue(value=user_email))]),
-            limit=limit,
-            with_payload=True
-        )
+        if user_email == "admin@example.com":
+            # Admin can search all documents, no filter applied
+            results = self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_vector,
+                limit=limit,
+                with_payload=True
+            )
+        else:
+            # Non-admin users search within their organization
+            org = users[user_email]["org"]
+            results = self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_vector,
+                query_filter=Filter(must=[FieldCondition(key="org", match=MatchValue(value=org))]),
+                limit=limit,
+                with_payload=True
+            )
         return results.points
 
     def get_processed_files(self, user_email: str = None):
-        if user_email:
-            return [file for file, email in self.processed_files.items() if email == user_email]
+        if user_email == "admin@example.com":
+            return list(self.processed_files.keys())  # Admin sees all files
+        elif user_email:
+            org = users[user_email]["org"]
+            return [file for file, email in self.processed_files.items() if users[email]["org"] == org]
         return list(self.processed_files.keys())
 
 
@@ -296,7 +313,9 @@ def delete_pdfs(filenames, current_files, selected_user_email):
         errors = []
 
         for filename in filenames:
-            if filename not in processor.processed_files or processor.processed_files[filename] != user_email:
+            if filename not in processor.processed_files or (
+                processor.processed_files[filename] != user_email and user_email != "admin@example.com"
+            ):
                 errors.append(f"File '{filename}' not found or not owned by {user_email}.")
                 continue
 
