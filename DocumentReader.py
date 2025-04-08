@@ -12,7 +12,8 @@ import PyPDF2
 import uuid
 import time
 import hashlib
-#adding comments
+
+# adding comments
 # User dictionary with emails as keys, including org and admin
 users = {
     "john.doe123@example.com": {"username": "User1", "id": str(uuid.uuid4()), "org": "Org1"},
@@ -314,7 +315,7 @@ def delete_pdfs(filenames, current_files, selected_user_email):
 
         for filename in filenames:
             if filename not in processor.processed_files or (
-                processor.processed_files[filename] != user_email and user_email != "admin@example.com"
+                    processor.processed_files[filename] != user_email and user_email != "admin@example.com"
             ):
                 errors.append(f"File '{filename}' not found or not owned by {user_email}.")
                 continue
@@ -342,7 +343,8 @@ def delete_pdfs(filenames, current_files, selected_user_email):
 def update_checkbox_choices(file_list):
     return file_list
 
-#search the qd db
+
+# search the qd db
 def search_qdrant(query, selected_user_email):
     try:
         user_email = selected_user_email
@@ -368,11 +370,11 @@ def chatbot_response(message, history, selected_user_email):
         context, source_files = search_qdrant(message, selected_user_email)
 
         system_prompt = (
-            "You are a helpful assistant that answers questions based on the provided document context. "
-            "Use the following context to answer the user's question. If the context doesn't contain "
-            "relevant information, say so and do not use external knowledge. Do not include source "
-            "information in your response; it will be appended separately.\n\n"
-            "Context:\n" + context
+                "You are a helpful assistant that answers questions based on the provided document context. "
+                "Use the following context to answer the user's question. If the context doesn't contain "
+                "relevant information, say so and do not use external knowledge. Do not include source "
+                "information in your response; it will be appended separately.\n\n"
+                "Context:\n" + context
         )
 
         messages = [{"role": "system", "content": system_prompt}]
