@@ -41,8 +41,8 @@ class DocumentProcessor:
                  qdrant_host="localhost",
                  qdrant_port=6333,
                  chunk_strategy="semantic",
-                 chunk_size=800,
-                 chunk_overlap=150,
+                 chunk_size=1000,
+                 chunk_overlap=200,
                  embedding_model="text-embedding-3-small",
                  batch_size=32):
         load_dotenv()
