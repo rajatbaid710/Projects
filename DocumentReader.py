@@ -8,10 +8,10 @@ from dotenv import load_dotenv
 import spacy
 import nltk
 from typing import List
-import PyPDF2
 import uuid
 import time
 import hashlib
+import PyPDF2
 
 # adding comments
 # User dictionary with emails as keys, including org and admin
