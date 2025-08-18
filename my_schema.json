@@ -1,0 +1,139 @@
+{
+  "users": {
+    "columns": [
+      {
+        "extra": "auto_increment",
+        "comment": "Unique identifier for each user",
+        "data_type": "int",
+        "column_name": "id",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "extra": "",
+        "comment": "User first name, increased length to 100",
+        "data_type": "varchar(100)",
+        "column_name": "first_name",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "extra": "",
+        "comment": "User last name, increased length to 100",
+        "data_type": "varchar(100)",
+        "column_name": "last_name",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "extra": "",
+        "comment": "User email, increased length to 150, unique constraint",
+        "data_type": "varchar(150)",
+        "column_name": "email",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "extra": "DEFAULT_GENERATED",
+        "comment": "Timestamp when the user was created",
+        "data_type": "timestamp",
+        "column_name": "created_at",
+        "is_nullable": "NO",
+        "column_default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "constraints": null
+  },
+  "contact_details": {
+    "columns": [
+      {
+        "extra": "auto_increment",
+        "comment": "Unique identifier for each contact detail",
+        "data_type": "int",
+        "column_name": "id",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "extra": "",
+        "comment": "Foreign key referencing the user",
+        "data_type": "int",
+        "column_name": "user_id",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "extra": "",
+        "comment": "First line of the user's address",
+        "data_type": "varchar(100)",
+        "column_name": "address_line_1",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "extra": "",
+        "comment": "Second line of the user's address, optional",
+        "data_type": "varchar(100)",
+        "column_name": "address_line_2",
+        "is_nullable": "YES",
+        "column_default": null
+      },
+      {
+        "extra": "",
+        "comment": "City of the user's address",
+        "data_type": "varchar(100)",
+        "column_name": "city",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "extra": "",
+        "comment": "State or region of the user's address",
+        "data_type": "varchar(100)",
+        "column_name": "state",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "extra": "",
+        "comment": "Country of the user's address",
+        "data_type": "varchar(100)",
+        "column_name": "country",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "extra": "",
+        "comment": "Postal or zip code of the user's address",
+        "data_type": "varchar(20)",
+        "column_name": "zip_code",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "extra": "",
+        "comment": "User's phone number",
+        "data_type": "varchar(50)",
+        "column_name": "phone",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "extra": "DEFAULT_GENERATED",
+        "comment": "Timestamp when the contact detail was created",
+        "data_type": "timestamp",
+        "column_name": "created_at",
+        "is_nullable": "YES",
+        "column_default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "constraints": [
+      {
+        "column_name": "user_id",
+        "constraint_name": "contact_details_ibfk_1",
+        "referenced_table": "users",
+        "referenced_column": "id"
+      }
+    ]
+  }
+}
