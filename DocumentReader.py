@@ -296,9 +296,11 @@ def process_pdf(file, current_files, selected_user_email):
 
         if "Successfully processed" in status_message:
             updated_files = processor.get_processed_files(user_email)
-            return status_message, updated_files, updated_files
+            # Return status, update CheckboxGroup choices and clear selection, and update state
+            return status_message, gr.update(choices=updated_files, value=[]), updated_files
         else:
-            return status_message, current_files, current_files
+            # No change to choices/state if upload failed
+            return status_message, gr.update(choices=current_files, value=[]), current_files
 
     except Exception as e:
         return f"Error processing PDF: {str(e)}", current_files, current_files
@@ -335,13 +337,15 @@ def delete_pdfs(filenames, current_files, selected_user_email):
             status += "\nErrors:\n" + "\n".join(errors)
 
         updated_files = processor.get_processed_files(user_email)
-        return status, updated_files, updated_files
+        # Return status, update CheckboxGroup choices (clear selection), and update state
+        return status, gr.update(choices=updated_files, value=[]), updated_files
     except Exception as e:
-        return f"Error deleting files: {str(e)}", current_files, current_files
+        return f"Error deleting files: {str(e)}", gr.update(choices=current_files, value=[]), current_files
 
 
 def update_checkbox_choices(file_list):
-    return file_list
+    # Return a Gradio Update to set the CheckboxGroup choices and clear selection
+    return gr.update(choices=file_list, value=[])
 
 
 # search the qd db
@@ -410,7 +414,9 @@ def clear_chat():
 
 
 def update_file_list(selected_user_email):
-    return processor.get_processed_files(selected_user_email)
+    files = processor.get_processed_files(selected_user_email)
+    # Return choices update for the CheckboxGroup (clear selection)
+    return gr.update(choices=files, value=[])
 
 
 # Gradio Interface
