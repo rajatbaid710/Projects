@@ -1,0 +1,9 @@
+gradio
+qdrant-client
+langchain
+langchain-openai
+python-dotenv
+nltk
+PyPDF2
+openai
+spacy

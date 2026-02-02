@@ -2,7 +2,7 @@ import os
 import gradio as gr
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from dotenv import load_dotenv
 import spacy
@@ -429,7 +429,7 @@ with gr.Blocks(title="Document Reader") as demo:
     with gr.Row():
         with gr.Column(scale=1):
             gr.Markdown("## Chat with Your Documents")
-            chatbot = gr.Chatbot(label="Document Chatbot", type="messages", height=400)
+            chatbot = gr.Chatbot(label="Document Chatbot",  height=400)
             msg = gr.Textbox(
                 label="Your Message",
                 placeholder="Ask anything about your uploaded documents..."
