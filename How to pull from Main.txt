@@ -1,0 +1,48 @@
+Open your terminal and confirm you’re on `x`:
+
+git branch
+If you’re not in `x`, switch to it:
+
+git checkout x
+Step 2: Save your local changes
+
+If you’ve made changes, commit them so they’re not lost:
+
+git add .
+git status
+git commit -m “WIP: local changes on x”
+Not ready to commit yet? No worries — stash them temporarily:
+
+git stash
+Step 3: Get the latest from ‘main’
+
+Now jump over to the `main` branch:
+
+git checkout main 
+Then pull the latest changes from the remote repo:
+
+git pull origin main
+This ensures your local ‘main’ is fully up-to-date.
+
+Step 4: Go back to your feature branch (`x`)
+
+Return to your working branch:
+
+
+git checkout x
+Step 5: Merge `main` into `x`
+
+Now it’s time to bring the latest ‘main’ changes into your branch:
+
+
+git merge main
+Git will now try to combine your branch (`x`) with the updated `main`.
+
+Got Conflicts?
+
+Don’t panic(Even if i say, I also panic sometimes) Git will flag the conflicting files. Just open them up, resolve the conflicts (they’re marked with `<<<<<<<`, `=======`, and `>>>>>>>`)
+
+
+git add .
+git status
+git commit -m “Merged main into x with conflict resolution”

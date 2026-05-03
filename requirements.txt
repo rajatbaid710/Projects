@@ -7,3 +7,4 @@ nltk
 PyPDF2
 openai
 spacy
+pandas
