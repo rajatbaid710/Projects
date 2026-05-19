@@ -1,15 +1,16 @@
-# Document Reader with Qdrant
+# Agentic Document Reader with Qdrant
 
-A Gradio-based web application that allows users to upload PDF documents, process them with semantic chunking, store embeddings in Qdrant, and perform intelligent document search and Q&A using OpenAI's language models.
+A Gradio-based web application that lets users upload **PDF, Word, Excel, image, or text files**. An LLM-driven **File-Type Agent** automatically picks the right reader tool for each file, extracts the text, generates embeddings with OpenAI, stores them in Qdrant, and enables multi-user, organization-scoped semantic Q&A over the uploaded documents.
 
 ## Table of Contents
 
 - [Features](#features)
 - [Architecture](#architecture)
+- [How the File-Type Agent Works](#how-the-file-type-agent-works)
+- [Supported File Types](#supported-file-types)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
-- [Guardrails](#guardrails)
 - [API Reference](#api-reference)
 - [Deployment](#deployment)
 - [Troubleshooting](#troubleshooting)
@@ -18,14 +19,16 @@ A Gradio-based web application that allows users to upload PDF documents, proces
 
 ## Features
 
-- **PDF Upload & Processing**: Upload PDF files with automatic text extraction and semantic chunking.
-- **Vector Embeddings**: Generate embeddings using OpenAI's `text-embedding-3-small` model and store in Qdrant.
-- **Multi-User & Organization Support**: Role-based access control with org-based document filtering.
-- **Semantic Search**: Find relevant document passages using vector similarity search.
-- **Document Q&A**: Ask questions about uploaded documents and get AI-powered answers with source attribution.
-- **Input Validation & Guardrails**: File type/size validation, jailbreak detection, and output safety checks.
-- **Duplicate Detection**: Content-hash based deduplication to prevent redundant uploads.
-- **Document Management**: Delete and manage uploaded documents with proper cleanup.
+- **Multi-format Ingestion**: Upload PDF, Word (`.docx`), Excel (`.xlsx`/`.xls`), images (with OCR), and plain-text files.
+- **Agentic File Reading**: An OpenAI tool-calling agent inspects each file and dynamically picks the right reader (PyPDF2, python-docx, openpyxl, pytesseract OCR, or plain-text).
+- **Agent Reasoning Log**: A collapsible panel in the UI shows exactly which tool the agent chose and how much text was extracted.
+- **Semantic Chunking**: Splits text using spaCy sentence boundaries (or recursive character splitting) before embedding.
+- **Vector Embeddings**: Generates embeddings with OpenAI's `text-embedding-3-small` model and stores them in Qdrant (1536-dim, cosine distance).
+- **Multi-User & Organization Scoping**: Users belong to organizations; queries and document listings are filtered by org. An `admin@example.com` user can see everything.
+- **Document Q&A Chatbot**: Ask questions about uploaded documents and get LLM answers with **source attribution** (filename list appended to each response).
+- **Relevance Filtering**: Only files within `0.15` of the top similarity score contribute to the answer context, reducing noise from weakly related documents.
+- **Duplicate Detection**: SHA-256 content hashing prevents re-uploading the same content twice for the same user.
+- **Document Management**: Per-user file list with multi-select deletion.
 
 ---
 
@@ -34,34 +37,70 @@ A Gradio-based web application that allows users to upload PDF documents, proces
 ```
 ┌──────────────────┐
 │   Gradio UI      │
-│  (Upload/Chat)   │
+│ Upload · Chat ·  │
+│ Manage · UserSel │
 └────────┬─────────┘
          │
-         ├─────────────────────────────────────┐
-         │                                     │
-         v                                     v
-┌──────────────────────┐         ┌─────────────────────┐
-│ DocumentProcessor    │         │  Search/Chat Path   │
-│  - Validate file     │         │                     │
-│  - Extract text      │         │  - Retrieve context │
-│  - Chunk (semantic)  │         │  - LLM call         │
-│  - Embed chunks      │         │  - Append sources   │
-│  - Dedupe check      │         └─────────────────────┘
-└──────────────┬───────┘
-               │
+         │  file
+         v
+┌──────────────────────────────┐
+│   File-Type Agent (LLM)      │
+│  Picks ONE tool via          │
+│  OpenAI function-calling:    │
+│  read_pdf · read_word ·      │
+│  read_excel · read_image ·   │
+│  read_text                   │
+└──────────────┬───────────────┘
+               │ extracted text
                v
-        ┌──────────────┐
-        │ OpenAI APIs  │
-        │  - Embeddings│
-        │  - LLM (GPT) │
-        └──────┬───────┘
+┌──────────────────────────────┐
+│      DocumentProcessor       │
+│  - Dedupe (sha256)           │
+│  - Chunk (semantic/recursive)│
+│  - Embed (OpenAI)            │
+│  - Upsert to Qdrant          │
+└──────────────┬───────────────┘
                │
                v
         ┌──────────────┐
         │    Qdrant    │
         │  Vector DB   │
-        └──────────────┘
+        └──────┬───────┘
+               │ top-k passages
+               v
+┌──────────────────────────────┐
+│  Chat path: Org-filtered     │
+│  retrieval → LLM → response  │
+│  + Sources line              │
+└──────────────────────────────┘
 ```
+
+---
+
+## How the File-Type Agent Works
+
+The core agentic pattern is **Observe → Decide → Act → Return**:
+
+1. **Observe** – The agent receives the uploaded filename and path.
+2. **Decide** – An OpenAI Chat Completions call with `tool_choice="required"` forces the LLM to pick exactly one of five available tools (`read_pdf`, `read_word`, `read_excel`, `read_image`, `read_text`) based on the file extension.
+3. **Act** – The chosen tool is dispatched through `TOOL_FUNCTIONS` and executes on the file path.
+4. **Return** – Extracted text plus a human-readable reasoning log is returned to the UI.
+
+If the LLM somehow returns no tool call, the agent falls back to `read_text`.
+
+---
+
+## Supported File Types
+
+| Category | Extensions | Reader |
+|----------|------------|--------|
+| PDF | `.pdf` | PyPDF2 |
+| Word | `.docx`, `.doc` | python-docx |
+| Excel | `.xlsx`, `.xls` | openpyxl |
+| Images | `.png`, `.jpg`, `.jpeg`, `.tiff`, `.bmp`, `.webp` | pytesseract (OCR) |
+| Text | `.txt`, `.md`, `.csv`, `.json`, `.xml`, `.html` | plain read |
+
+> **Note**: OCR requires the **Tesseract** binary to be installed on the host (see [Installation](#installation)).
 
 ---
 
@@ -70,57 +109,55 @@ A Gradio-based web application that allows users to upload PDF documents, proces
 ### Prerequisites
 
 - Python 3.8+
-- Qdrant instance (local Docker or cloud)
-- OpenAI API key
+- A running Qdrant instance (local Docker or cloud)
+- An OpenAI API key
+- **Tesseract OCR** binary (only required for image uploads)
 
 ### Setup Steps
 
-1. **Clone/Navigate to project directory**:
+1. **Navigate to the project directory**:
    ```bash
    cd /Users/rajatbaid/Documents/code/Projects
    ```
 
-2. **Create virtual environment**:
+2. **Create a virtual environment**:
    ```bash
    python3 -m venv venv
    source venv/bin/activate
    ```
 
-3. **Install dependencies**:
+3. **Install Python dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
 
-   Or manually:
-   ```bash
-   pip install gradio qdrant-client langchain langchain-openai python-dotenv spacy nltk PyPDF2
-   ```
-
-4. **Download spaCy model**:
+4. **Download the spaCy English model** (used for semantic chunking):
    ```bash
    python -m spacy download en_core_web_sm
    ```
+   The app will also try to auto-download this on first run if missing.
 
-5. **Set up environment variables** (create `.env` file):
+5. **Install Tesseract OCR** (only needed for image files):
+   - macOS: `brew install tesseract`
+   - Ubuntu/Debian: `sudo apt-get install tesseract-ocr`
+   - Windows: download installer from the [Tesseract releases page](https://github.com/UB-Mannheim/tesseract/wiki).
+
+6. **Create a `.env` file** in the project root:
    ```env
    OPENAI_API_KEY=sk-...
-   QDRANT_CLUSTER=<api-key>  # If using cloud Qdrant
-   MAX_UPLOAD_MB=20
-   MAX_PDF_PAGES=500
-   ENABLE_PII_REDACTION=true
+   OPENAI_LLM_MODEL=gpt-3.5-turbo
    ```
 
-6. **Start Qdrant** (if using local):
+7. **Start Qdrant locally** (if not using a cloud cluster):
    ```bash
    docker run -p 6333:6333 qdrant/qdrant
    ```
 
-7. **Run the application**:
+8. **Run the application**:
    ```bash
-   python DocumentReader.py
+   python AgenticDocReader.py
    ```
-
-   The app will launch at `http://localhost:7860`
+   The app launches at `http://localhost:7860`.
 
 ---
 
@@ -130,279 +167,195 @@ Configure behavior via environment variables in `.env`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENAI_API_KEY` | Required | OpenAI API key for embeddings and LLM |
-| `MAX_UPLOAD_MB` | 20 | Max file size for PDF uploads (MB) |
-| `MAX_PDF_PAGES` | 500 | Max pages allowed per PDF |
-| `MAX_CHUNKS` | 2000 | Max chunks to embed per document |
-| `ENABLE_PII_REDACTION` | true | Enable PII masking before chunking |
-| `QDRANT_CLUSTER` | Optional | Qdrant cloud cluster API key |
+| `OPENAI_API_KEY` | **Required** | OpenAI API key used for the file-type agent, embeddings, and chat LLM. |
+| `OPENAI_LLM_MODEL` | `gpt-3.5-turbo` | Chat model used by the file-type agent and the document Q&A chatbot. |
 
-**LLM Configuration** (hardcoded in code):
-- Model: `gpt-3.5-turbo` (adjust `OPENAI_LLM_MODEL`)
-- Temperature: `0.2` (low randomness for consistency)
-- Embedding Model: `text-embedding-3-small`
-- Vector Size: `1536`
+**Hardcoded settings** (edit `AgenticDocReader.py` to change):
+
+| Setting | Value | Location |
+|---------|-------|----------|
+| Qdrant host / port | `localhost` / `6333` | `DocumentProcessor.__init__` |
+| Collection name | `aiml_vector_db` | `DocumentProcessor.__init__` |
+| Chunking strategy | `semantic` (spaCy sentences) | `DocumentProcessor.__init__` |
+| Chunk size / overlap | `800` / `150` | `DocumentProcessor.__init__` |
+| Embedding model | `text-embedding-3-small` | `DocumentProcessor.__init__` |
+| Vector size / distance | `1536` / cosine | `DocumentProcessor._create_collection` |
+| Embedding batch size | `32` | `DocumentProcessor.__init__` |
+| LLM temperature | `0.2` | `ChatOpenAI` instantiation |
+| Relevance window | top score − `0.15` | `search_qdrant` |
+| Retrieval `top_k` | `5` | `DocumentProcessor.search` |
 
 ---
 
 ## Usage
 
-### 1. Start the Application
+### 1. Start the application
 
 ```bash
 source venv/bin/activate
-python DocumentReader.py
+python AgenticDocReader.py
 ```
 
-### 2. Select User
+### 2. Pick a user
 
-Use the dropdown to select a user. Each user sees only documents from their organization.
+Use the **User** dropdown to switch identities. Each user sees only documents belonging to their organization; `admin@example.com` sees every file.
 
-**Predefined Users**:
-- `john.doe123@example.com` (Org1)
-- `jane.smith456@example.com` (Org1)
-- `bob.jones789@example.com` (Org2)
-- `alice.brown321@example.com` (Org2)
-- `mike.wilson654@example.com` (Org2)
-- `admin@example.com` (Admin – sees all documents)
+**Predefined users**:
 
-### 3. Upload PDF
+| Email | Org |
+|-------|-----|
+| `john.doe123@example.com`  | Org1 |
+| `jane.smith456@example.com` | Org1 |
+| `bob.jones789@example.com`  | Org2 |
+| `alice.brown321@example.com` | Org2 |
+| `mike.wilson654@example.com` | Org2 |
+| `admin@example.com` | _(all orgs)_ |
 
-1. Click **"Upload PDF"** and select a `.pdf` file.
-2. Click **"Process PDF"** button.
-3. Status message shows success or error (file too large, invalid, etc.).
-4. Document appears in **"Manage Documents"** section after successful upload.
+### 3. Upload a file
 
-### 4. Chat with Documents
+1. Drag-and-drop or pick a file in **"Upload File"** (any [supported type](#supported-file-types)).
+2. Click **"Process File"**.
+3. The **Upload Status** box shows success/failure.
+4. Expand **"Agent Log"** to see which reader tool the agent chose and how many characters it extracted.
 
-1. Type a question in the **"Your Message"** textbox.
-2. Click **"Submit"** or press Enter.
-3. Response appears in the chatbot with sources listed.
-4. Click **"Clear Chat"** to reset conversation history.
+### 4. Chat with your documents
 
-### 5. Delete Documents
+1. Type a question in **"Your Message"**.
+2. Click **"Submit"**.
+3. The chatbot answers using only the retrieved org-scoped context and appends a `Sources: ...` line listing every contributing file.
+4. Use **"Clear Chat"** to reset conversation history.
 
-1. Check the document(s) you want to delete in **"Manage Documents"**.
-2. Click **"Delete Selected PDFs"**.
-3. Status confirms deletion; the file list updates.
+### 5. Delete documents
 
----
-
-## Guardrails
-
-### Input Guardrails
-
-#### 1. File Validation
-- **Type check**: Only `.pdf` files allowed.
-- **Size check**: Default max `20 MB` (configurable).
-- **Page count**: Default max `500` pages (configurable).
-
-#### 2. Jailbreak Detection
-User input is scanned for potentially malicious patterns:
-- `"ignore previous instructions"`
-- `"you are now"` / `"act as"`
-- `"jailbreak"` / `"DAN"`
-- `"reveal your"` / `"show me the code"`
-- `"list all users"` / `"delete document"`
-- And more...
-
-If detected, response is: _"I'm sorry, I can't help with that request."_
-
-#### 3. Duplicate Detection
-Content hashes prevent re-uploading identical documents.
-
-### Output Guardrails
-
-#### 1. Strict System Prompt
-The LLM is instructed to:
-- Use only provided document context.
-- Say "I don't have information about that..." if answer not found.
-- Never reveal other users' documents or system internals.
-- Never make up information.
-
-#### 2. Source Attribution
-All responses include a `Sources:` section listing document files used to answer the question.
-
-#### 3. Response Safety
-- Responses are checked for banned terms (e.g., "kill", "bomb", "terror").
-- Maximum response length: `400` tokens (configurable).
+1. Select files in **"Select Files to Delete"**.
+2. Click **"Delete Selected Files"**.
+3. Status confirms which files were removed; the list refreshes automatically.
 
 ---
 
 ## API Reference
 
-### Core Functions
+### File-Type Agent
 
-#### `DocumentProcessor` Class
+**`file_type_agent(file_path, filename, llm_client) -> (text, log)`**
+Runs the OpenAI tool-calling loop to pick and execute one of the `FILE_TOOLS`. Returns the extracted text plus a multi-line reasoning log shown in the UI.
 
-**`__init__(...)`**
-Initialize the document processor with Qdrant connection and embedding config.
+**Reader implementations**:
+- `read_pdf(file_path)` – text extraction via PyPDF2.
+- `read_word(file_path)` – paragraph and table-cell extraction via python-docx.
+- `read_excel(file_path)` – per-sheet tab-separated dump via openpyxl.
+- `read_image(file_path)` – OCR via pytesseract.
+- `read_text(file_path)` – UTF-8 read with error-ignoring decoder.
 
-**`process_document(text, source_file, user_email)`**
-- Extract, chunk, embed, and upsert a document.
-- Returns: Success/error message.
-- **Checks**: Dedupe, chunk count limit, user permissions.
+### `DocumentProcessor` class
 
-**`delete_by_source_file(source_file)`**
-- Delete all embeddings for a file.
-- Returns: 0 if successful, -1 on error.
+| Method | Description |
+|--------|-------------|
+| `__init__(...)` | Connects to Qdrant, ensures the collection exists, configures the splitter (`semantic` or `recursive_char`), wires up OpenAI embeddings, and pre-loads the set of already-processed files. |
+| `process_document(text, source_file, user_email)` | Hashes the content, skips duplicates, splits into chunks, embeds in batches of 32, and upserts to Qdrant with payload `{text, source_file, user_email, content_hash, org}`. |
+| `delete_by_source_file(source_file)` | Deletes all points whose `source_file` matches. Returns the number of remaining points (or `-1` on error). |
+| `search(query_vector, user_email, limit=5)` | Vector search filtered by the user's `org` (admin sees all). |
+| `get_processed_files(user_email)` | Returns the file list visible to the user. |
 
-**`search(query_vector, user_email, limit=5)`**
-- Semantic search filtered by user's organization.
-- Returns: List of top-k passages with metadata.
+### UI callbacks (Gradio)
 
-**`get_processed_files(user_email)`**
-- Return files visible to the user (org-filtered).
-- Admin sees all; regular users see only their org's files.
-
----
-
-### UI Callbacks
-
-#### `process_pdf(file, current_files, selected_user_email)`
-Handles PDF upload: validates, extracts, processes, and upserts to Qdrant.
-
-**Returns**: `(status_message, updated_checkbox, file_state)`
-
-#### `delete_pdfs(filenames, current_files, selected_user_email)`
-Delete selected PDFs and update UI.
-
-**Returns**: `(status_message, updated_checkbox, file_state)`
-
-#### `chatbot_response(message, history, selected_user_email)`
-Process user query, search documents, call LLM, and return answer with sources.
-
-**Returns**: Response string (with sources appended).
-
-#### `chat_handler(message, history, selected_user_email)`
-Wrapper that appends user message and assistant response to history.
-
-**Returns**: `(updated_history, "")`
-
-#### `search_qdrant(query, selected_user_email)`
-Perform semantic search on user's documents.
-
-**Returns**: `(context_string, set_of_source_files)`
-
----
-
-### Guardrail Functions
-
-#### `is_potentially_malicious(question: str) -> bool`
-Checks if input matches known jailbreak/injection patterns.
-
-#### `validate_pdf_file(file) -> (bool, str)`
-Validates file type, size, and page count. Returns `(is_valid, error_msg)`.
+| Callback | Purpose |
+|----------|---------|
+| `process_file(file, current_files, user_email)` | Validates the extension, runs the file-type agent, calls `process_document`, refreshes the file list. |
+| `delete_pdfs(filenames, current_files, user_email)` | Deletes selected files (with ownership/org checks; admin bypasses ownership). |
+| `chatbot_response(message, history, user_email)` | Runs retrieval, calls the chat LLM, and appends a `Sources:` line. |
+| `chat_handler(message, history, user_email)` | Normalizes Gradio chat history into the OpenAI message format and updates the chatbot state. |
+| `search_qdrant(query, user_email)` | Embeds the query, retrieves top-k, applies the `0.15` relevance window, and returns `(context, source_files)`. |
+| `update_file_list(user_email)` | Refreshes the file checkbox group when the active user changes. |
+| `clear_chat()` | Resets chat history. |
 
 ---
 
 ## Deployment
 
-### Local Development
+### Local development
 
 ```bash
-python DocumentReader.py
-# Access at http://localhost:7860
+python AgenticDocReader.py
+# http://localhost:7860
 ```
 
-### Production Deployment (Uvicorn)
+### Docker
 
-```bash
-pip install uvicorn
-uvicorn DocumentReader:app --host 0.0.0.0 --port 7860
-```
+Example `Dockerfile`:
 
-### Docker Deployment
-
-Create `Dockerfile`:
 ```dockerfile
 FROM python:3.10-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install -r requirements.txt && python -m spacy download en_core_web_sm
-COPY DocumentReader.py .
-CMD ["python", "DocumentReader.py"]
+RUN pip install --no-cache-dir -r requirements.txt \
+ && python -m spacy download en_core_web_sm
+
+COPY AgenticDocReader.py .
+EXPOSE 7860
+CMD ["python", "AgenticDocReader.py"]
 ```
 
 Build and run:
+
 ```bash
-docker build -t document-reader .
-docker run -p 7860:7860 --env-file .env document-reader
+docker build -t agentic-doc-reader .
+docker run -p 7860:7860 --env-file .env agentic-doc-reader
 ```
 
 ### Cloud Qdrant
 
 1. Create a cluster on [qdrant.io](https://qdrant.io).
-2. Set `QDRANT_CLUSTER` API key in `.env`.
-3. Modify `DocumentProcessor.__init__` to use cloud URL instead of `localhost:6333`.
+2. Update the `QdrantClient(host=..., port=...)` call in `DocumentProcessor.__init__` to point at your cluster URL and pass the API key.
 
 ---
 
 ## Troubleshooting
 
-### "OPENAI_API_KEY not set"
-- Ensure `.env` file exists in project root.
-- Run: `source venv/bin/activate` before running the app.
-- Verify key is valid in OpenAI dashboard.
+### `OPENAI_API_KEY` is missing or invalid
+- Make sure `.env` is in the project root and the venv is activated.
+- Re-issue the key in the OpenAI dashboard if requests 401.
 
-### "Could not connect to Qdrant"
-- Ensure Qdrant is running: `docker ps` should show Qdrant container.
-- If using cloud, verify `QDRANT_CLUSTER` is set and accessible.
-- Check firewall/network settings.
+### Cannot connect to Qdrant
+- Check that the container is running: `docker ps | grep qdrant`.
+- The app defaults to `localhost:6333`; update `DocumentProcessor.__init__` if Qdrant is remote.
 
-### "File too large" / "PDF too long"
-- Adjust `MAX_UPLOAD_MB` and `MAX_PDF_PAGES` in `.env`.
-- Or split large PDFs into smaller files.
+### `spaCy` model `en_core_web_sm` not found
+- Run `python -m spacy download en_core_web_sm`. The app also attempts this download automatically on first launch.
 
-### "No chunks generated"
-- PDF may be image-scanned (no extractable text).
-- Use OCR tools to convert scanned PDFs to text first.
+### Image OCR returns empty text
+- Confirm Tesseract is installed and on `PATH` (`tesseract --version`).
+- Low-resolution or heavily skewed images may need pre-processing before OCR.
 
-### Slow uploads
-- Large PDFs take time to chunk and embed.
-- Consider splitting into smaller documents.
-- Check OpenAI API quota and rate limits.
+### "Very little text extracted" warning in the Agent Log
+- The file may be a scanned PDF (no text layer), an empty document, or an unsupported binary payload.
+- For scanned PDFs, convert pages to images first and re-upload them as images so the OCR tool is used.
 
-### "I don't have information about that..."
-- The question is not answerable from uploaded documents.
-- Upload relevant documents or rephrase the question.
+### Duplicate content detected
+- The content hash matched an existing upload for the same user. Modify the content or upload from a different user account.
 
-### Admin can't see other users' documents
-- This is intentional (privacy by design).
-- Only admins can see org-filtered results; non-admins see only their org's docs.
-
----
-
-## Security Considerations
-
-1. **Never commit `.env`** with real API keys.
-2. **Use Vault or cloud secrets manager** in production.
-3. **Enable HTTPS** when deployed publicly.
-4. **Audit logs**: Log all uploads, deletions, and queries for compliance.
-5. **Rate limiting**: Implement Redis-based rate limits on production.
-6. **PII redaction**: Enable `ENABLE_PII_REDACTION=true` by default.
+### Admin can't see another user's files
+- Admin queries are unfiltered by org, but the file list shown in the UI is `processor.get_processed_files("admin@example.com")` — verify those files were actually upserted (e.g., the user uploaded under a non-admin account).
 
 ---
 
 ## Future Enhancements
 
-- [ ] Add Redis for rate limiting and caching.
-- [ ] Integrate OpenAI Moderation API for output safety.
-- [ ] Add advanced hallucination detection (fact verification per claim).
-- [ ] Support for other file formats (DOCX, TXT, etc.).
-- [ ] Background job queue (Celery) for large uploads.
-- [ ] Multi-language support.
-- [ ] Fine-tuned models for domain-specific Q&A.
-- [ ] Analytics dashboard (usage, costs, performance metrics).
+- [ ] Input guardrails (jailbreak/prompt-injection detection on chat queries).
+- [ ] Output safety filters (e.g., OpenAI Moderation API).
+- [ ] File-size and page-count limits with user feedback.
+- [ ] PII redaction before embedding.
+- [ ] Persistent ID generation so `next_id` survives restarts.
+- [ ] Background job queue for large uploads.
+- [ ] Multi-language spaCy models for non-English semantic chunking.
 
 ---
 
 ## License
 
-Proprietary – Internal use only.
-
----
-
-## Support
-
-For issues or questions, contact the development team.
+Proprietary – internal use only.

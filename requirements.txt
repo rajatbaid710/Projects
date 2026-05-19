@@ -2,9 +2,13 @@ gradio
 qdrant-client
 langchain
 langchain-openai
+langchain-text-splitters
+openai
 python-dotenv
+spacy
 nltk
 PyPDF2
-openai
-spacy
-pandas
+python-docx
+openpyxl
+Pillow
+pytesseract
