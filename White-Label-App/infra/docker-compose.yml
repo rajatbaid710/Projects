@@ -1,0 +1,112 @@
+name: white-label-app
+
+# Local development stack.
+#
+# By default this runs ONLY the three data services — Postgres, Redis, Qdrant.
+# The API and the web client run on your host:
+#
+#   docker compose -f infra/docker-compose.yml up -d   # data services
+#   cd backend  && .venv/bin/uvicorn app.main:app --reload
+#   cd frontend && npm run dev
+#
+# That is the fastest loop: a native debugger attaches, reload is instant, and a
+# dependency change is a pip/npm install rather than an image rebuild. Docker is
+# here to supply three servers, not to run your code.
+#
+# The containerised API exists for parity checks and as the deploy artifact, and
+# is behind a profile so it stays out of the way:
+#
+#   docker compose -f infra/docker-compose.yml --profile full up --build
+#
+# Image tags: pinned by major version for reproducibility. Pin to exact patch
+# versions before this stack is used for staging or production.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # The api service waits on this, so `docker compose up` can't race the
+      # migration against a database that isn't accepting connections yet.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-app}"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  qdrant:
+    # Pinned exactly, and it must track the qdrant-client version in
+    # backend/pyproject.toml — the client refuses more than a minor version of
+    # drift and warns loudly. `:latest` on Docker Hub lags the real latest
+    # release (it served 1.15.1 while 1.18.0 was out), so it is not usable here.
+    image: qdrant/qdrant:v1.18.0
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # No healthcheck: the image ships neither curl nor wget, so any check here
+    # would be theatre. The API's /health/ready probe covers it instead.
+
+  api:
+    # Opt-in only: `--profile full`. The default `up` leaves this off so the
+    # host-run API is the normal path.
+    profiles: ["full"]
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    # Migrations are NOT run here. Two replicas starting together would race
+    # each other, and a failed migration would look like a crash loop. Run them
+    # as their own step:
+    #     docker compose -f infra/docker-compose.yml run --rm api alembic upgrade head
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    environment:
+      PRODUCT_NAME: ${PRODUCT_NAME:-White Label App}
+      ENVIRONMENT: local
+      DEBUG: ${DEBUG:-false}
+      # Service names, not localhost — these resolve on the compose network.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-app}
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # Source mount + --reload gives edit-and-refresh without a rebuild.
+      - ../backend:/srv
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:

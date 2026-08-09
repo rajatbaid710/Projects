@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+/* Brand tokens as CSS custom properties.
+ *
+ * These mirror src/theme/tokens.ts. They live as variables rather than literal
+ * Tailwind theme values so that Phase 4 can overwrite them at runtime from
+ * `GET /config/theme` — see applyTheme() — and every utility class updates with
+ * no rebuild. Keep the two files in sync when adding a token. */
+:root {
+  --brand: #4f46e5;
+  --brand-contrast: #ffffff;
+  --surface: #ffffff;
+  --surface-muted: #f4f4f5;
+  --fg: #18181b;
+  --fg-muted: #52525b;
+  --border: #e4e4e7;
+  --success: #15803d;
+  --warning: #a16207;
+  --danger: #b91c1c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --brand: #818cf8;
+    --brand-contrast: #1e1b4b;
+    --surface: #09090b;
+    --surface-muted: #18181b;
+    --fg: #fafafa;
+    --fg-muted: #a1a1aa;
+    --border: #27272a;
+    --success: #4ade80;
+    --warning: #fbbf24;
+    --danger: #f87171;
+  }
+}
+
+/* `inline` is required when theme values reference other custom properties —
+ * it makes Tailwind emit var() references instead of resolving at build time,
+ * which is what keeps runtime rebranding possible. */
+@theme inline {
+  --color-brand: var(--brand);
+  --color-brand-contrast: var(--brand-contrast);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-border: var(--border);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+body {
+  background-color: var(--surface);
+  color: var(--fg);
+  font-family: var(--font-sans);
+}
